@@ -301,7 +301,7 @@ class VolumeCandleStrategy:
                 elif volume_decrease and is_small_body:
                     signal = "BUY"
 
-                elif volume_decrease:
+                elif volume_decrease and not is_small_body:
                     signal = "SELL"
                 
                 signals.append((interval, signal))
