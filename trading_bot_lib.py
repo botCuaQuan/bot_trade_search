@@ -297,12 +297,13 @@ class VolumeCandleStrategy:
                 if volume_increase:
                     signal = "BUY"
                 
+                # Quy tắc 2: Volume tăng + nến đỏ -> BÁN  
+                elif volume_decrease and not is_small_body:
+                    signal = "SELL"
+                
                 # Quy tắc 3: Volume giảm + nến thân nhỏ -> MUA (chỉ mua)
                 elif volume_decrease and is_small_body:
                     signal = "BUY"
-
-                elif volume_decrease and not is_small_body:
-                    signal = "SELL"
                 
                 signals.append((interval, signal))
             
