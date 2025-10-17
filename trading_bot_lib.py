@@ -849,11 +849,6 @@ class BaseBot:
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
         
-        if self.symbol:
-            self.log(f"🟢 Bot {strategy_name} khởi động | {self.symbol} | ĐB: {lev}x | Vốn: {percent}% | TP/SL: {tp}%/{sl}%")
-        else:
-            self.log(f"🟢 Bot {strategy_name} khởi động | Đang tìm coin... | ĐB: {lev}x | Vốn: {percent}% | TP/SL: {tp}%/{sl}%")
-
     def _register_coin_with_retry(self, symbol):
         max_retries = 3
         for attempt in range(max_retries):
@@ -876,7 +871,6 @@ class BaseBot:
         """Xóa cache của coin finder khi cần thiết"""
         try:
             self.coin_finder.clear_cache()
-            self.log("🧹 Đã xóa cache tìm kiếm coin")
         except Exception as e:
             self.log(f"⚠️ Lỗi khi xóa cache: {str(e)}")
     def _handle_price_update(self, price):
@@ -910,23 +904,18 @@ class BaseBot:
                         sell_count += 1
             
             total = buy_count + sell_count
-            self.log(f"🔍 VỊ THẾ BINANCE: {buy_count} LONG, {sell_count} SHORT")
             
             if total == 0:
                 direction = "BUY" if random.random() > 0.5 else "SELL"
-                self.log(f"⚖️ QUYẾT ĐỊNH: Không có vị thế → RANDOM {direction}")
                 return direction
             
             # Bước 1: So sánh số lượng - bên nào nhiều hơn thì hướng tiếp theo là NGƯỢC LẠI
             if buy_count > sell_count:
-                self.log(f"⚖️ QUYẾT ĐỊNH: Nhiều LONG hơn ({buy_count} vs {sell_count}) → TÌM SHORT")
                 return "SELL"
             elif sell_count > buy_count:
-                self.log(f"⚖️ QUYẾT ĐỊNH: Nhiều SHORT hơn ({sell_count} vs {buy_count}) → TÌM LONG")  
                 return "BUY"
             else:
                 direction = "BUY" if random.random() > 0.5 else "SELL"
-                self.log(f"⚖️ QUYẾT ĐỊNH: Cân bằng → RANDOM {direction}")
                 return direction
                 
         except Exception as e:
@@ -966,9 +955,6 @@ class BaseBot:
         """TÌM VÀ SET COIN MỚI - BỎ QUA COIN KHÔNG PHÙ HỢP NGAY LẬP TỨC"""
         try:
             self.current_target_direction = self.get_target_direction()
-            
-            self.log(f"🎯 Đang tìm coin {self.current_target_direction} với đòn bẩy {self.lev}x...")
-            
             managed_coins = self.coin_manager.get_managed_coins()
             excluded_symbols = set(managed_coins.keys())
             
@@ -983,11 +969,9 @@ class BaseBot:
             )
         
             if coin_data is None:
-                self.log(f"⚠️ Không tìm thấy coin {self.current_target_direction} với đòn bẩy {self.lev}x phù hợp")
                 return False
                 
             if not coin_data.get('qualified', False):
-                self.log(f"⚠️ Coin {coin_data.get('symbol', 'UNKNOWN')} không đủ tiêu chuẩn, tìm coin khác")
                 return False
             
             new_symbol = coin_data['symbol']
@@ -995,7 +979,6 @@ class BaseBot:
             
             # KIỂM TRA LẠI ĐÒN BẨY - QUAN TRỌNG!
             if max_leverage < self.lev:
-                self.log(f"❌ Coin {new_symbol} chỉ hỗ trợ {max_leverage}x < {self.lev}x -> BỎ QUA VÀ TÌM COIN KHÁC")
                 return False
             
             # ĐĂNG KÝ COIN - NẾU THẤT BẠI THÌ TIẾP TỤC TÌM
@@ -1006,13 +989,9 @@ class BaseBot:
                 
                 self.symbol = new_symbol
                 self.ws_manager.add_symbol(self.symbol, self._handle_price_update)
-                
-                self.log(f"✅ Đã tìm thấy và đăng ký coin {new_symbol} - {self.current_target_direction} - Đòn bẩy: {self.lev}x")
-                
                 self.status = "waiting"
                 return True
             else:
-                self.log(f"❌ Không thể đăng ký coin {new_symbol} - có thể đã có bot khác trade, tìm coin khác")
                 return False
                 
         except Exception as e:
@@ -1140,7 +1119,6 @@ class BaseBot:
                 return False
     
             if self.should_be_removed:
-                self.log("⚠️ Bot đã được đánh dấu xóa, không mở lệnh mới")
                 return False
     
             # KIỂM TRA LẠI ĐÒN BẨY TRƯỚC KHI MỞ LỆNH
