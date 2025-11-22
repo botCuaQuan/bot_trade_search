@@ -2181,7 +2181,7 @@ class BotManager:
             # XỬ LÝ CÁC BƯỚC TẠO BOT (giữ nguyên code cũ nhưng bao bọc try-except)
             elif current_step == 'waiting_bot_count':
                 try:
-                    # ... (code xử lý step)
+                    pass# ... (code xử lý step)
                 except Exception as e:
                     send_telegram(f"❌ Lỗi xử lý bước: {str(e)}", chat_id,
                                 self.telegram_bot_token, self.telegram_chat_id)
