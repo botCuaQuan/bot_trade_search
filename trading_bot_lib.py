@@ -37,11 +37,11 @@ def _last_closed_1m_quote_volume(symbol):
 # ========== CẤU HÌNH LOGGING ==========
 def setup_logging():
     logging.basicConfig(
-        level=logging.WARNING,  # CHỈ HIỂN THỊ WARNING VÀ ERROR
+        level=logging.INFO,  # 🚨 THAY ĐỔI: WARNING → INFO
         format='%(asctime)s - %(levelname)s - %(module)s - %(message)s',
         handlers=[
             logging.StreamHandler(),
-            logging.FileHandler('bot_errors.log')
+            logging.FileHandler('bot_debug.log', encoding='utf-8')
         ]
     )
     return logging.getLogger()
