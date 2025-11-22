@@ -59,18 +59,28 @@ def escape_html(text):
                 .replace('"', '&quot;'))
 
 def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, default_chat_id=None):
+    """Gửi tin nhắn Telegram - ĐÃ SỬA LỖI 404"""
     if not bot_token:
         logger.warning("Telegram Bot Token chưa được thiết lập")
-        return
+        return False
     
     chat_id = chat_id or default_chat_id
     if not chat_id:
         logger.warning("Telegram Chat ID chưa được thiết lập")
-        return
+        return False
     
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    # 🔴 SỬA QUAN TRỌNG: Xử lý Bot Token đúng cách
+    # Bot Token phải có dạng: "bot1234567890:ABCdefGHIjklMnOpQRstUVwxyz"
+    # Nhưng URL phải là: "https://api.telegram.org/bot1234567890:ABCdefGHIjklMnOpQRstUVwxyz/sendMessage"
     
-    # ESCAPE MESSAGE ĐỂ TRÁNH LỖI HTML
+    # Loại bỏ tiền tố 'bot' nếu có (vì chúng ta sẽ thêm lại trong URL)
+    clean_bot_token = bot_token
+    if clean_bot_token.startswith('bot'):
+        clean_bot_token = clean_bot_token[3:]
+    
+    url = f"https://api.telegram.org/bot{clean_bot_token}/sendMessage"
+    
+    # ESCAPE MESSAGE ĐỂ TRÁNH LỐI HTML
     safe_message = escape_html(message)
     
     payload = {
@@ -80,15 +90,51 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
     }
     
     if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
+        payload["reply_markup"] = reply_markup
     
     try:
-        response = requests.post(url, json=payload, timeout=15)
-        if response.status_code != 200:
-            logger.error(f"Lỗi Telegram ({response.status_code}): {response.text}")
+        # 🔴 THÊM: Headers để tránh bị chặn
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        
+        if response.status_code == 200:
+            logger.debug(f"✅ Đã gửi Telegram: {message[:50]}...")
+            return True
+        else:
+            error_msg = f"Lỗi Telegram ({response.status_code}): {response.text}"
+            logger.error(error_msg)
+            
+            # 🔴 PHÂN TÍCH LỖI CHI TIẾT
+            try:
+                error_data = response.json()
+                if not error_data.get('ok'):
+                    description = error_data.get('description', 'Unknown error')
+                    
+                    if response.status_code == 404:
+                        logger.error(f"❌ Lỗi 404 - Bot Token không hợp lệ: {clean_bot_token[:10]}...")
+                        logger.error(f"   Mô tả lỗi: {description}")
+                    elif "chat not found" in description.lower():
+                        logger.error("❌ Chat ID không hợp lệ hoặc bot chưa được khởi động trong chat này")
+                    elif "bot was blocked" in description.lower():
+                        logger.error("❌ Bot đã bị người dùng chặn")
+            except:
+                pass
+                
+            return False
+            
+    except requests.exceptions.Timeout:
+        logger.error("⏰ Timeout khi gửi tin nhắn Telegram")
+        return False
+    except requests.exceptions.ConnectionError:
+        logger.error("🔌 Lỗi kết nối khi gửi Telegram")
+        return False
     except Exception as e:
-        logger.error(f"Lỗi kết nối Telegram: {str(e)}")
-
+        logger.error(f"❌ Lỗi không xác định khi gửi Telegram: {str(e)}")
+        return False
 # ========== MENU TELEGRAM HOÀN CHỈNH ==========
 def create_cancel_keyboard():
     return {
