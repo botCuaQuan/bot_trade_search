@@ -2045,164 +2045,454 @@ class BotManager:
                 time.sleep(5)
 
     def _handle_telegram_message(self, chat_id, text):
-        """Xử lý tin nhắn Telegram - ĐÃ SỬA: THÊM TRY-EXCEPT TOÀN DIỆN"""
-        try:
-            user_state = self.user_states.get(chat_id, {})
-            current_step = user_state.get('step')
+        """Xử lý tin nhắn Telegram - SỬA: KÍCH HOẠT LẠI TẤT CẢ CHỨC NĂNG"""
+        user_state = self.user_states.get(chat_id, {})
+        current_step = user_state.get('step')
+        
+        # 🔴 SỬA: XỬ LÝ TẤT CẢ CÁC LỆNH CHÍNH TRƯỚC KHI XỬ LÝ STEP
+        
+        # XỬ LÝ LỆNH CHÍNH
+        if text == "➕ Thêm Bot":
+            self.user_states[chat_id] = {'step': 'waiting_bot_count'}
+            balance = get_balance(self.api_key, self.api_secret)
+            if balance is None:
+                send_telegram("❌ <b>LỖI KẾT NỐI BINANCE</b>\nVui lòng kiểm tra API Key và kết nối mạng!", chat_id,
+                            self.telegram_bot_token, self.telegram_chat_id)
+                return
             
-            # 🔴 SỬA: XỬ LÝ TẤT CẢ CÁC LỆNH CHÍNH TRƯỚC KHI XỬ LÝ STEP
-            
-            # XỬ LÝ LỆNH CHÍNH
-            if text == "➕ Thêm Bot":
-                try:
-                    self.user_states[chat_id] = {'step': 'waiting_bot_count'}
-                    balance = get_balance(self.api_key, self.api_secret)
-                    if balance is None:
-                        send_telegram("❌ <b>LỖI KẾT NỐI BINANCE</b>\nVui lòng kiểm tra API Key và kết nối mạng!", chat_id,
-                                    self.telegram_bot_token, self.telegram_chat_id)
-                        return
-                    
-                    send_telegram(
-                        f"🎯 <b>CHỌN SỐ LƯỢNG COIN CHO BOT</b>\n\n"
-                        f"💰 Số dư hiện có: <b>{balance:.2f} USDT</b>\n\n"
-                        f"Chọn số lượng coin mà bot sẽ quản lý (nối tiếp):",
-                        chat_id,
-                        create_bot_count_keyboard(),
-                        self.telegram_bot_token, self.telegram_chat_id
-                    )
-                    return
-                except Exception as e:
-                    send_telegram(f"❌ Lỗi khi xử lý 'Thêm Bot': {str(e)}", chat_id,
+            send_telegram(
+                f"🎯 <b>CHỌN SỐ LƯỢNG COIN CHO BOT</b>\n\n"
+                f"💰 Số dư hiện có: <b>{balance:.2f} USDT</b>\n\n"
+                f"Chọn số lượng coin mà bot sẽ quản lý (nối tiếp):",
+                chat_id,
+                create_bot_count_keyboard(),
+                self.telegram_bot_token, self.telegram_chat_id
+            )
+            return
+        
+        elif text == "📊 Danh sách Bot":
+            summary = self.get_position_summary()
+            send_telegram(summary, chat_id,
+                         self.telegram_bot_token, self.telegram_chat_id)
+            return
+        
+        elif text == "📊 Thống kê":
+            summary = self.get_position_summary()
+            send_telegram(summary, chat_id,
+                         self.telegram_bot_token, self.telegram_chat_id)
+            return
+        
+        elif text == "⛔ Dừng Bot":
+            if not self.bots:
+                send_telegram("🤖 Không có bot nào đang chạy", chat_id,
+                            self.telegram_bot_token, self.telegram_chat_id)
+            else:
+                message = "⛔ <b>CHỌN BOT ĐỂ DỪNG</b>\n\n"
+                
+                # Hiển thị tất cả bot đang chạy
+                bot_keyboard = []
+                
+                for bot_id, bot in self.bots.items():
+                    bot_keyboard.append([{"text": f"⛔ Bot: {bot_id}"}])
+                
+                # Tạo keyboard
+                keyboard = []
+                
+                if bot_keyboard:
+                    keyboard.extend(bot_keyboard)
+                    keyboard.append([{"text": "⛔ DỪNG TẤT CẢ BOT"}])
+                
+                keyboard.append([{"text": "❌ Hủy bỏ"}])
+                
+                send_telegram(
+                    message, 
+                    chat_id, 
+                    {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": True},
+                    self.telegram_bot_token, self.telegram_chat_id
+                )
+            return
+        
+        elif text == "💰 Số dư":
+            try:
+                balance = get_balance(self.api_key, self.api_secret)
+                if balance is None:
+                    send_telegram("❌ <b>LỖI KẾT NỐI BINANCE</b>\nVui lòng kiểm tra API Key và kết nối mạng!", chat_id,
+                                self.telegram_bot_token, self.telegram_chat_id)
+                else:
+                    send_telegram(f"💰 <b>SỐ DƯ KHẢ DỤNG</b>: {balance:.2f} USDT", chat_id,
+                                self.telegram_bot_token, self.telegram_chat_id)
+            except Exception as e:
+                send_telegram(f"⚠️ Lỗi lấy số dư: {str(e)}", chat_id,
+                            self.telegram_bot_token, self.telegram_chat_id)
+            return
+        
+        elif text == "📈 Vị thế":
+            try:
+                positions = get_positions(api_key=self.api_key, api_secret=self.api_secret)
+                if not positions:
+                    send_telegram("📭 Không có vị thế nào đang mở", chat_id,
                                 self.telegram_bot_token, self.telegram_chat_id)
                     return
+                
+                message = "📈 <b>VỊ THẾ ĐANG MỞ</b>\n\n"
+                for pos in positions:
+                    position_amt = float(pos.get('positionAmt', 0))
+                    if position_amt != 0:
+                        symbol = pos.get('symbol', 'UNKNOWN')
+                        entry = float(pos.get('entryPrice', 0))
+                        side = "LONG" if position_amt > 0 else "SHORT"
+                        pnl = float(pos.get('unRealizedProfit', 0))
+                        
+                        message += (
+                            f"🔹 {symbol} | {side}\n"
+                            f"📊 Khối lượng: {abs(position_amt):.4f}\n"
+                            f"🏷️ Giá vào: {entry:.4f}\n"
+                            f"💰 PnL: {pnl:.2f} USDT\n\n"
+                        )
+                
+                send_telegram(message, chat_id,
+                            self.telegram_bot_token, self.telegram_chat_id)
+            except Exception as e:
+                send_telegram(f"⚠️ Lỗi lấy vị thế: {str(e)}", chat_id,
+                            self.telegram_bot_token, self.telegram_chat_id)
+            return
+        
+        elif text == "🎯 Chiến lược":
+            strategy_info = (
+                "🎯 <b>HỆ THỐNG RSI + KHỐI LƯỢNG NÂNG CAO</b>\n\n"
+                
+                "📈 <b>6 ĐIỀU KIỆN VÀO LỆNH:</b>\n"
+                "1. RSI > 80 + giá tăng + volume tăng → BÁN\n"
+                "2. RSI < 20 + giá giảm + volume giảm → BÁN\n"  
+                "3. RSI > 80 + giá tăng + volume giảm → MUA\n"
+                "4. RSI < 20 + giá giảm + volume tăng → MUA\n"
+                "5. RSI > 20 + giá không giảm + volume giảm → MUA\n"
+                "6. RSI < 80 + giá không tăng + volume tăng → BÁN\n\n"
+                
+                "🎯 <b>ĐIỀU KIỆN ĐÓNG LỆNH:</b>\n"
+                "• GIỐNG HỆT điều kiện vào lệnh\n"
+                "• Nhưng khối lượng thay đổi 40% (thay vì 20%)\n"
+                "• VÀ phải đạt ROI trigger do người dùng thiết lập\n"
+                "• Chỉ chốt lời, không vào lệnh ngược\n\n"
+                
+                "🔄 <b>CƠ CHẾ ĐIỀU PHỐI:</b>\n"
+                "• Mỗi bot quản lý nhiều coin\n"
+                "• Các coin trong bot xử lý nối tiếp nhau\n"
+                "• Chờ 2s giữa các coin trong cùng bot\n"
+                "• Tránh hoàn toàn vào lệnh đồng thời\n\n"
+                
+                "🚫 <b>KIỂM TRA VỊ THẾ:</b>\n"
+                "• Tự động phát hiện coin đã có vị thế\n"
+                "• Không vào lệnh trên coin đã có vị thế\n"
+                "• Tự động chuyển sang tìm coin khác"
+            )
+            send_telegram(strategy_info, chat_id,
+                        self.telegram_bot_token, self.telegram_chat_id)
+            return
+        
+        elif text == "⚙️ Cấu hình":
+            balance = get_balance(self.api_key, self.api_secret)
+            api_status = "✅ Đã kết nối" if balance is not None else "❌ Lỗi kết nối"
             
-            elif text == "📊 Danh sách Bot":
-                try:
-                    summary = self.get_position_summary()
-                    send_telegram(summary, chat_id,
-                                self.telegram_bot_token, self.telegram_chat_id)
-                    return
-                except Exception as e:
-                    send_telegram(f"❌ Lỗi khi lấy danh sách bot: {str(e)}", chat_id,
-                                self.telegram_bot_token, self.telegram_chat_id)
-                    return
+            total_bots_with_coins = 0
+            trading_bots = 0
             
-            elif text == "📊 Thống kê":
-                try:
-                    summary = self.get_position_summary()
-                    send_telegram(summary, chat_id,
-                                self.telegram_bot_token, self.telegram_chat_id)
-                    return
-                except Exception as e:
-                    send_telegram(f"❌ Lỗi khi lấy thống kê: {str(e)}", chat_id,
-                                self.telegram_bot_token, self.telegram_chat_id)
-                    return
+            for bot in self.bots.values():
+                if hasattr(bot, 'active_symbols'):
+                    if len(bot.active_symbols) > 0:
+                        total_bots_with_coins += 1
+                    for symbol, data in bot.symbol_data.items():
+                        if data.get('position_open', False):
+                            trading_bots += 1
             
-            elif text == "⛔ Dừng Bot":
-                try:
-                    if not self.bots:
-                        send_telegram("🤖 Không có bot nào đang chạy", chat_id,
-                                    self.telegram_bot_token, self.telegram_chat_id)
-                        return
-                    
-                    message = "⛔ <b>CHỌN BOT ĐỂ DỪNG</b>\n\n"
-                    bot_keyboard = []
-                    
-                    for bot_id, bot in self.bots.items():
-                        bot_keyboard.append([{"text": f"⛔ Bot: {bot_id}"}])
-                    
-                    keyboard = []
-                    if bot_keyboard:
-                        keyboard.extend(bot_keyboard)
-                        keyboard.append([{"text": "⛔ DỪNG TẤT CẢ BOT"}])
-                    keyboard.append([{"text": "❌ Hủy bỏ"}])
-                    
-                    send_telegram(
-                        message, 
-                        chat_id, 
-                        {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": True},
-                        self.telegram_bot_token, self.telegram_chat_id
-                    )
-                    return
-                except Exception as e:
-                    send_telegram(f"❌ Lỗi khi xử lý 'Dừng Bot': {str(e)}", chat_id,
+            config_info = (
+                "⚙️ <b>CẤU HÌNH HỆ THỐNG RSI + KHỐI LƯỢNG</b>\n\n"
+                f"🔑 Binance API: {api_status}\n"
+                f"🤖 Tổng số bot: {len(self.bots)}\n"
+                f"📊 Bot có coin: {total_bots_with_coins}\n"
+                f"🟢 Bot đang trade: {trading_bots}\n"
+                f"🌐 WebSocket: {len(self.ws_manager.connections)} kết nối\n\n"
+                f"🔄 <b>CƠ CHẾ NỐI TIẾP ĐANG HOẠT ĐỘNG</b>\n"
+                f"🎯 <b>6 ĐIỀU KIỆN RSI ĐANG HOẠT ĐỘNG</b>"
+            )
+            send_telegram(config_info, chat_id,
+                        self.telegram_bot_token, self.telegram_chat_id)
+            return
+        
+        # XỬ LÝ LỆNH DỪNG TỪNG COIN
+        elif text.startswith("⛔ Coin: "):
+            parts = text.replace("⛔ Coin: ", "").split(" | Bot: ")
+            if len(parts) == 2:
+                symbol = parts[0].strip()
+                bot_id = parts[1].strip()
+                
+                if self.stop_bot_symbol(bot_id, symbol):
+                    send_telegram(f"✅ Đã dừng coin {symbol} trong bot {bot_id}", chat_id,
                                 self.telegram_bot_token, self.telegram_chat_id)
-                    return
-            
-            elif text == "💰 Số dư":
-                try:
-                    balance = get_balance(self.api_key, self.api_secret)
-                    if balance is None:
-                        send_telegram("❌ <b>LỖI KẾT NỐI BINANCE</b>\nVui lòng kiểm tra API Key và kết nối mạng!", chat_id,
-                                    self.telegram_bot_token, self.telegram_chat_id)
-                    else:
-                        send_telegram(f"💰 <b>SỐ DƯ KHẢ DỤNG</b>: {balance:.2f} USDT", chat_id,
-                                    self.telegram_bot_token, self.telegram_chat_id)
-                    return
-                except Exception as e:
-                    send_telegram(f"⚠️ Lỗi lấy số dư: {str(e)}", chat_id,
+                else:
+                    send_telegram(f"❌ Không thể dừng coin {symbol}", chat_id,
                                 self.telegram_bot_token, self.telegram_chat_id)
-                    return
-            
-            elif text == "📈 Vị thế":
-                try:
-                    positions = get_positions(api_key=self.api_key, api_secret=self.api_secret)
-                    if not positions:
-                        send_telegram("📭 Không có vị thế nào đang mở", chat_id,
-                                    self.telegram_bot_token, self.telegram_chat_id)
-                        return
-                    
-                    message = "📈 <b>VỊ THẾ ĐANG MỞ</b>\n\n"
-                    for pos in positions:
-                        position_amt = float(pos.get('positionAmt', 0))
-                        if position_amt != 0:
-                            symbol = pos.get('symbol', 'UNKNOWN')
-                            entry = float(pos.get('entryPrice', 0))
-                            side = "LONG" if position_amt > 0 else "SHORT"
-                            pnl = float(pos.get('unRealizedProfit', 0))
-                            
-                            message += (
-                                f"🔹 {symbol} | {side}\n"
-                                f"📊 Khối lượng: {abs(position_amt):.4f}\n"
-                                f"🏷️ Giá vào: {entry:.4f}\n"
-                                f"💰 PnL: {pnl:.2f} USDT\n\n"
-                            )
-                    
-                    send_telegram(message, chat_id,
-                                self.telegram_bot_token, self.telegram_chat_id)
-                    return
-                except Exception as e:
-                    send_telegram(f"⚠️ Lỗi lấy vị thế: {str(e)}", chat_id,
-                                self.telegram_bot_token, self.telegram_chat_id)
-                    return
-            
-            # ... (TIẾP TỤC XỬ LÝ CÁC TRƯỜNG HỢP KHÁC VỚI TRY-EXCEPT TƯƠNG TỰ)
-            
-            # XỬ LÝ CÁC BƯỚC TẠO BOT (giữ nguyên code cũ nhưng bao bọc try-except)
-            elif current_step == 'waiting_bot_count':
-                try:
-                    pass# ... (code xử lý step)
-                except Exception as e:
-                    send_telegram(f"❌ Lỗi xử lý bước: {str(e)}", chat_id,
-                                self.telegram_bot_token, self.telegram_chat_id)
-                    return
-            
-            # ... (CÁC STEP KHÁC CŨNG THÊM TRY-EXCEPT)
-            
-            # Nếu không xử lý được gì, gửi menu chính
+            return
+        
+        # XỬ LÝ LỆNH DỪNG TẤT CẢ COIN
+        elif text == "⛔ DỪNG TẤT CẢ COIN":
+            stopped_count = self.stop_all_coins()
+            send_telegram(f"✅ Đã dừng {stopped_count} coin, hệ thống vẫn chạy", chat_id,
+                        self.telegram_bot_token, self.telegram_chat_id)
+            return
+        
+        # XỬ LÝ LỆNH DỪNG BOT
+        elif text.startswith("⛔ Bot: "):
+            bot_id = text.replace("⛔ Bot: ", "").strip()
+            if self.stop_bot(bot_id):
+                send_telegram(f"✅ Đã dừng bot {bot_id}", chat_id,
+                            self.telegram_bot_token, self.telegram_chat_id)
+            else:
+                send_telegram(f"❌ Không tìm thấy bot {bot_id}", chat_id,
+                            self.telegram_bot_token, self.telegram_chat_id)
+            return
+        
+        # XỬ LÝ LỆNH DỪNG TẤT CẢ BOT
+        elif text == "⛔ DỪNG TẤT CẢ BOT":
+            stopped_count = self.stop_all()
+            send_telegram(f"✅ Đã dừng {stopped_count} bot, hệ thống vẫn chạy", chat_id,
+                        self.telegram_bot_token, self.telegram_chat_id)
+            return
+
+        # XỬ LÝ CÁC BƯỚC TẠO BOT
+        elif current_step == 'waiting_bot_count':
+            if text == '❌ Hủy bỏ':
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy thêm bot", chat_id, create_main_menu(),
+                            self.telegram_bot_token, self.telegram_chat_id)
             else:
                 try:
-                    self.send_main_menu(chat_id)
-                except Exception as e:
-                    send_telegram(f"❌ Lỗi khi gửi menu chính: {str(e)}", chat_id,
+                    bot_count = int(text)
+                    if bot_count <= 0 or bot_count > 10:
+                        send_telegram("⚠️ Số lượng coin phải từ 1 đến 10. Vui lòng chọn lại:",
+                                    chat_id, create_bot_count_keyboard(),
+                                    self.telegram_bot_token, self.telegram_chat_id)
+                        return
+    
+                    user_state['bot_count'] = bot_count
+                    user_state['step'] = 'waiting_bot_mode'
+                    
+                    send_telegram(
+                        f"🤖 Số lượng coin: {bot_count}\n\n"
+                        f"Chọn chế độ bot:",
+                        chat_id,
+                        create_bot_mode_keyboard(),
+                        self.telegram_bot_token, self.telegram_chat_id
+                    )
+                except ValueError:
+                    send_telegram("⚠️ Vui lòng nhập số hợp lệ cho số lượng coin:",
+                                chat_id, create_bot_count_keyboard(),
                                 self.telegram_bot_token, self.telegram_chat_id)
-        
-        except Exception as e:
-            # 🔴 BẮT LỖI TOÀN BỘ HÀM - QUAN TRỌNG!
-            error_msg = f"❌ LỖI HỆ THỐNG KHI XỬ LÝ TIN NHẮN: {str(e)}\n\n📝 Vui lòng thử lại hoặc liên hệ hỗ trợ!"
-            send_telegram(error_msg, chat_id, self.telegram_bot_token, self.telegram_chat_id)
-            logger.error(f"Lỗi toàn bộ _handle_telegram_message: {str(e)}")
-            logger.error(traceback.format_exc())
+    
+        elif current_step == 'waiting_bot_mode':
+            if text == '❌ Hủy bỏ':
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy thêm bot", chat_id, create_main_menu(),
+                            self.telegram_bot_token, self.telegram_chat_id)
+            elif text in ["🤖 Bot Tĩnh - Coin cụ thể", "🔄 Bot Động - Tự tìm coin"]:
+                if text == "🤖 Bot Tĩnh - Coin cụ thể":
+                    user_state['bot_mode'] = 'static'
+                    user_state['step'] = 'waiting_symbol'
+                    send_telegram(
+                        "🎯 <b>ĐÃ CHỌN: BOT TĨNH</b>\n\n"
+                        "🤖 Bot sẽ giao dịch coin CỐ ĐỊNH\n"
+                        "📊 Bạn cần chọn coin cụ thể\n\n"
+                        "Chọn coin:",
+                        chat_id,
+                        create_symbols_keyboard(),
+                        self.telegram_bot_token, self.telegram_chat_id
+                    )
+                else:
+                    user_state['bot_mode'] = 'dynamic'
+                    user_state['step'] = 'waiting_leverage'
+                    send_telegram(
+                        "🎯 <b>ĐÃ CHỌN: BOT ĐỘNG</b>\n\n"
+                        f"🤖 Bot sẽ quản lý <b>{user_state.get('bot_count', 1)} coin</b>\n"
+                        f"🔄 Bot sẽ xử lý từng coin một theo thứ tự\n\n"
+                        "Chọn đòn bẩy:",
+                        chat_id,
+                        create_leverage_keyboard(),
+                        self.telegram_bot_token, self.telegram_chat_id
+                    )
+    
+        elif current_step == 'waiting_symbol':
+            if text == '❌ Hủy bỏ':
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy thêm bot", chat_id, create_main_menu(),
+                            self.telegram_bot_token, self.telegram_chat_id)
+            else:
+                user_state['symbol'] = text
+                user_state['step'] = 'waiting_leverage'
+                send_telegram(
+                    f"🔗 Coin: {text}\n\n"
+                    f"Chọn đòn bẩy:",
+                    chat_id,
+                    create_leverage_keyboard(),
+                    self.telegram_bot_token, self.telegram_chat_id
+                )
+    
+        elif current_step == 'waiting_leverage':
+            if text == '❌ Hủy bỏ':
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy thêm bot", chat_id, create_main_menu(),
+                            self.telegram_bot_token, self.telegram_chat_id)
+            else:
+                if text.endswith('x'):
+                    lev_text = text[:-1]
+                else:
+                    lev_text = text
+    
+                try:
+                    leverage = int(lev_text)
+                    if leverage <= 0 or leverage > 100:
+                        send_telegram("⚠️ Đòn bẩy phải từ 1 đến 100. Vui lòng chọn lại:",
+                                    chat_id, create_leverage_keyboard(),
+                                    self.telegram_bot_token, self.telegram_chat_id)
+                        return
+    
+                    user_state['leverage'] = leverage
+                    user_state['step'] = 'waiting_percent'
+                    
+                    balance = get_balance(self.api_key, self.api_secret)
+                    balance_info = f"\n💰 Số dư hiện có: {balance:.2f} USDT" if balance else ""
+                    
+                    send_telegram(
+                        f"💰 Đòn bẩy: {leverage}x{balance_info}\n\n"
+                        f"Chọn % số dư cho mỗi lệnh:",
+                        chat_id,
+                        create_percent_keyboard(),
+                        self.telegram_bot_token, self.telegram_chat_id
+                    )
+                except ValueError:
+                    send_telegram("⚠️ Vui lòng nhập số hợp lệ cho đòn bẩy:",
+                                chat_id, create_leverage_keyboard(),
+                                self.telegram_bot_token, self.telegram_chat_id)
+    
+        elif current_step == 'waiting_percent':
+            if text == '❌ Hủy bỏ':
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy thêm bot", chat_id, create_main_menu(),
+                            self.telegram_bot_token, self.telegram_chat_id)
+            else:
+                try:
+                    percent = float(text)
+                    if percent <= 0 or percent > 100:
+                        send_telegram("⚠️ % số dư phải từ 0.1 đến 100. Vui lòng chọn lại:",
+                                    chat_id, create_percent_keyboard(),
+                                    self.telegram_bot_token, self.telegram_chat_id)
+                        return
+    
+                    user_state['percent'] = percent
+                    user_state['step'] = 'waiting_tp'
+                    
+                    balance = get_balance(self.api_key, self.api_secret)
+                    actual_amount = balance * (percent / 100) if balance else 0
+                    
+                    send_telegram(
+                        f"📊 % Số dư: {percent}%\n"
+                        f"💵 Số tiền mỗi lệnh: ~{actual_amount:.2f} USDT\n\n"
+                        f"Chọn Take Profit (%):",
+                        chat_id,
+                        create_tp_keyboard(),
+                        self.telegram_bot_token, self.telegram_chat_id
+                    )
+                except ValueError:
+                    send_telegram("⚠️ Vui lòng nhập số hợp lệ cho % số dư:",
+                                chat_id, create_percent_keyboard(),
+                                self.telegram_bot_token, self.telegram_chat_id)
+    
+        elif current_step == 'waiting_tp':
+            if text == '❌ Hủy bỏ':
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy thêm bot", chat_id, create_main_menu(),
+                            self.telegram_bot_token, self.telegram_chat_id)
+            else:
+                try:
+                    tp = float(text)
+                    if tp <= 0:
+                        send_telegram("⚠️ Take Profit phải lớn hơn 0. Vui lòng chọn lại:",
+                                    chat_id, create_tp_keyboard(),
+                                    self.telegram_bot_token, self.telegram_chat_id)
+                        return
+    
+                    user_state['tp'] = tp
+                    user_state['step'] = 'waiting_sl'
+                    
+                    send_telegram(
+                        f"🎯 Take Profit: {tp}%\n\n"
+                        f"Chọn Stop Loss (%):",
+                        chat_id,
+                        create_sl_keyboard(),
+                        self.telegram_bot_token, self.telegram_chat_id
+                    )
+                except ValueError:
+                    send_telegram("⚠️ Vui lòng nhập số hợp lệ cho Take Profit:",
+                                chat_id, create_tp_keyboard(),
+                                self.telegram_bot_token, self.telegram_chat_id)
+    
+        elif current_step == 'waiting_sl':
+            if text == '❌ Hủy bỏ':
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy thêm bot", chat_id, create_main_menu(),
+                            self.telegram_bot_token, self.telegram_chat_id)
+            else:
+                try:
+                    sl = float(text)
+                    if sl < 0:
+                        send_telegram("⚠️ Stop Loss phải lớn hơn hoặc bằng 0. Vui lòng chọn lại:",
+                                    chat_id, create_sl_keyboard(),
+                                    self.telegram_bot_token, self.telegram_chat_id)
+                        return
+    
+                    user_state['sl'] = sl
+                    user_state['step'] = 'waiting_roi_trigger'
+                    
+                    send_telegram(
+                        f"🛡️ Stop Loss: {sl}%\n\n"
+                        f"🎯 <b>CHỌN NGƯỠNG ROI ĐỂ KÍCH HOẠT CƠ CHẾ CHỐT LỆNH THÔNG MINH</b>\n\n"
+                        f"Chọn ngưỡng ROI trigger (%):",
+                        chat_id,
+                        create_roi_trigger_keyboard(),
+                        self.telegram_bot_token, self.telegram_chat_id
+                    )
+                except ValueError:
+                    send_telegram("⚠️ Vui lòng nhập số hợp lệ cho Stop Loss:",
+                                chat_id, create_sl_keyboard(),
+                                self.telegram_bot_token, self.telegram_chat_id)
+    
+        elif current_step == 'waiting_roi_trigger':
+            if text == '❌ Hủy bỏ':
+                self.user_states[chat_id] = {}
+                send_telegram("❌ Đã hủy thêm bot", chat_id, create_main_menu(),
+                            self.telegram_bot_token, self.telegram_chat_id)
+            elif text == '❌ Tắt tính năng':
+                user_state['roi_trigger'] = None
+                self._finish_bot_creation(chat_id, user_state)
+            else:
+                try:
+                    roi_trigger = float(text)
+                    if roi_trigger <= 0:
+                        send_telegram("⚠️ ROI Trigger phải lớn hơn 0. Vui lòng chọn lại:",
+                                    chat_id, create_roi_trigger_keyboard(),
+                                    self.telegram_bot_token, self.telegram_chat_id)
+                        return
+    
+                    user_state['roi_trigger'] = roi_trigger
+                    self._finish_bot_creation(chat_id, user_state)
+                    
+                except ValueError:
+                    send_telegram("⚠️ Vui lòng nhập số hợp lệ cho ROI Trigger:",
+                                chat_id, create_roi_trigger_keyboard(),
+                                self.telegram_bot_token, self.telegram_chat_id)
+    
+        # Nếu không xử lý được gì, gửi menu chính
+        else:
+            self.send_main_menu(chat_id)
 
     def _finish_bot_creation(self, chat_id, user_state):
         """Hoàn tất quá trình tạo bot - SỬA: HOẠT ĐỘNG LẠI"""
