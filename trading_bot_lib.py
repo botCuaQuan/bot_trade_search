@@ -856,7 +856,7 @@ class WebSocketManager:
 # ========== BASE BOT VỚI HỆ THỐNG RSI + KHỐI LƯỢNG MỚI ==========
 class BaseBot:
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager, api_key, api_secret,
-                 telegram_bot_token, telegram_chat_id, strategy_name, config_key=None, telegram_chat_id=None,
+                 telegram_bot_token, telegram_chat_id, strategy_name, config_key=None, bot_id=None,
                  coin_manager=None, symbol_locks=None, max_coins=1):
 
         # 🔴 SỬA: MỖI BOT CÓ THỂ QUẢN LÝ NHIỀU COIN
@@ -877,7 +877,7 @@ class BaseBot:
         self.telegram_chat_id = telegram_chat_id
         self.strategy_name = strategy_name
         self.config_key = config_key
-        self.telegram_chat_id = telegram_chat_id or f"{strategy_name}_{int(time.time())}_{random.randint(1000, 9999)}"
+        self.bot_id = bot_id or f"{strategy_name}_{int(time.time())}_{random.randint(1000, 9999)}"
 
         self.status = "searching" if not symbol else "waiting"
         self._stop = False
@@ -1293,7 +1293,7 @@ class BaseBot:
 
                     message = (
                         f"✅ <b>ĐÃ MỞ VỊ THẾ {symbol}</b>\n"
-                        f"🤖 Bot: {self.telegram_chat_id}\n"
+                        f"🤖 Bot: {self.bot_id}\n"
                         f"📌 Hướng: {side}\n"
                         f"🏷️ Giá vào: {avg_price:.4f}\n"
                         f"📊 Khối lượng: {executed_qty:.4f}\n"
@@ -1361,7 +1361,7 @@ class BaseBot:
                 
                 message = (
                     f"⛔ <b>ĐÃ ĐÓNG VỊ THẾ {symbol}</b>\n"
-                    f"🤖 Bot: {self.telegram_chat_id}\n"
+                    f"🤖 Bot: {self.bot_id}\n"
                     f"📌 Lý do: {reason}\n"
                     f"🏷️ Giá ra: {current_price:.4f}\n"
                     f"📊 Khối lượng: {close_qty:.4f}\n"
@@ -1636,9 +1636,9 @@ class BaseBot:
         # Chỉ log các message có chứa emoji hoặc từ khóa quan trọng
         important_keywords = ['❌', '✅', '⛔', '💰', '📈', '📊', '🎯', '🛡️', '🔴', '🟢', '⚠️', '🚫']
         if any(keyword in message for keyword in important_keywords):
-            logger.warning(f"[{self.telegram_chat_id}] {message}")
+            logger.warning(f"[{self.bot_id}] {message}")
             if self.telegram_bot_token and self.telegram_chat_id:
-                send_telegram(f"<b>{self.telegram_chat_id}</b>: {message}", 
+                send_telegram(f"<b>{self.bot_id}</b>: {message}", 
                              bot_token=self.telegram_bot_token, 
                              default_chat_id=self.telegram_chat_id)
 
@@ -1746,7 +1746,7 @@ class BotManager:
             total_coins_managed = 0
             trading_coins = 0
             
-            for telegram_chat_id, bot in self.bots.items():
+            for bot_id, bot in self.bots.items():
                 coins_count = len(bot.active_symbols) if hasattr(bot, 'active_symbols') else 0
                 total_coins_managed += coins_count
                 
@@ -1758,7 +1758,7 @@ class BotManager:
                 trading_coins += trading_count
                 
                 bot_info = {
-                    'telegram_chat_id': telegram_chat_id,
+                    'bot_id': bot_id,
                     'coins_count': coins_count,
                     'max_coins': bot.max_coins,
                     'trading_count': trading_count,
@@ -1795,7 +1795,7 @@ class BotManager:
                 summary += "📋 **CHI TIẾT TỪNG BOT**:\n"
                 for bot in bot_details:
                     status_emoji = "🟢" if bot['trading_count'] > 0 else "🟡" if bot['coins_count'] > 0 else "🔴"
-                    summary += f"{status_emoji} **{bot['telegram_chat_id']}**\n"
+                    summary += f"{status_emoji} **{bot['bot_id']}**\n"
                     summary += f"   💰 ĐB: {bot['leverage']}x | Vốn: {bot['percent']}%\n"
                     summary += f"   📊 Coin: {bot['coins_count']}/{bot['max_coins']} | Đang trade: {bot['trading_count']}\n"
                     
@@ -1893,11 +1893,11 @@ class BotManager:
         # 🔴 SỬA QUAN TRỌNG: CHỈ TẠO 1 BOT, NHƯNG BOT ĐÓ QUẢN LÝ bot_count COIN
         try:
             if bot_mode == 'static' and symbol:
-                telegram_chat_id = f"STATIC_{strategy_type}_{int(time.time())}"
+                bot_id = f"STATIC_{strategy_type}_{int(time.time())}"
             else:
-                telegram_chat_id = f"DYNAMIC_{strategy_type}_{int(time.time())}"
+                bot_id = f"DYNAMIC_{strategy_type}_{int(time.time())}"
             
-            if telegram_chat_id in self.bots:
+            if bot_id in self.bots:
                 return False
             
             # 🔴 SỬA: TRUYỀN max_coins = bot_count - BOT NÀY SẼ QUẢN LÝ bot_count COIN
@@ -1907,12 +1907,12 @@ class BotManager:
                 strategy_name="Hệ-thống-RSI-Khối-lượng",
                 coin_manager=self.coin_manager,
                 symbol_locks=self.symbol_locks,
-                telegram_chat_id=telegram_chat_id,
+                bot_id=bot_id,
                 max_coins=bot_count  # 🔴 QUAN TRỌNG: 1 BOT QUẢN LÝ NHIỀU COIN
             )
             
             bot._bot_manager = self
-            self.bots[telegram_chat_id] = bot
+            self.bots[bot_id] = bot
             created_count = 1
                 
         except Exception as e:
@@ -1958,22 +1958,22 @@ class BotManager:
             self.log("❌ Không thể tạo bot")
             return False
 
-    def stop_bot_symbol(self, telegram_chat_id, symbol):
+    def stop_bot_symbol(self, bot_id, symbol):
         """Dừng một coin cụ thể trong bot - SỬA: GỌI TRỰC TIẾP STOP_SYMBOL CỦA BASEBOT"""
-        bot = self.bots.get(telegram_chat_id)
+        bot = self.bots.get(bot_id)
         if bot and hasattr(bot, 'stop_symbol'):
             success = bot.stop_symbol(symbol)
             if success:
-                self.log(f"⛔ Đã dừng coin {symbol} trong bot {telegram_chat_id}")
+                self.log(f"⛔ Đã dừng coin {symbol} trong bot {bot_id}")
                 return True
         return False
 
-    def stop_all_bot_symbols(self, telegram_chat_id):
+    def stop_all_bot_symbols(self, bot_id):
         """Dừng tất cả coin trong một bot - SỬA: GỌI TRỰC TIẾP STOP_ALL_SYMBOLS CỦA BASEBOT"""
-        bot = self.bots.get(telegram_chat_id)
+        bot = self.bots.get(bot_id)
         if bot and hasattr(bot, 'stop_all_symbols'):
             stopped_count = bot.stop_all_symbols()
-            self.log(f"⛔ Đã dừng {stopped_count} coin trong bot {telegram_chat_id}")
+            self.log(f"⛔ Đã dừng {stopped_count} coin trong bot {bot_id}")
             return stopped_count
         return 0
 
@@ -1982,30 +1982,30 @@ class BotManager:
         self.log("⛔ Đang dừng tất cả coin trong tất cả bot...")
         
         total_stopped = 0
-        for telegram_chat_id, bot in self.bots.items():
+        for bot_id, bot in self.bots.items():
             if hasattr(bot, 'stop_all_symbols'):
                 stopped_count = bot.stop_all_symbols()
                 total_stopped += stopped_count
-                self.log(f"⛔ Đã dừng {stopped_count} coin trong bot {telegram_chat_id}")
+                self.log(f"⛔ Đã dừng {stopped_count} coin trong bot {bot_id}")
         
         self.log(f"✅ Đã dừng tổng cộng {total_stopped} coin, hệ thống vẫn chạy và có thể thêm coin mới")
         return total_stopped
 
-    def stop_bot(self, telegram_chat_id):
+    def stop_bot(self, bot_id):
         """Dừng toàn bộ bot (đóng tất cả vị thế và xóa bot)"""
-        bot = self.bots.get(telegram_chat_id)
+        bot = self.bots.get(bot_id)
         if bot:
             bot.stop()
-            del self.bots[telegram_chat_id]
-            self.log(f"🔴 Đã dừng bot {telegram_chat_id}")
+            del self.bots[bot_id]
+            self.log(f"🔴 Đã dừng bot {bot_id}")
             return True
         return False
 
     def stop_all(self):
         """Dừng tất cả bot (đóng tất cả vị thế và xóa tất cả bot)"""
         self.log("🔴 Đang dừng tất cả bot...")
-        for telegram_chat_id in list(self.bots.keys()):
-            self.stop_bot(telegram_chat_id)
+        for bot_id in list(self.bots.keys()):
+            self.stop_bot(bot_id)
         self.log("🔴 Đã dừng tất cả bot, hệ thống vẫn chạy và có thể thêm bot mới")
 
     def _telegram_listener(self):
@@ -2092,8 +2092,8 @@ class BotManager:
                 # Hiển thị tất cả bot đang chạy
                 bot_keyboard = []
                 
-                for telegram_chat_id, bot in self.bots.items():
-                    bot_keyboard.append([{"text": f"⛔ Bot: {telegram_chat_id}"}])
+                for bot_id, bot in self.bots.items():
+                    bot_keyboard.append([{"text": f"⛔ Bot: {bot_id}"}])
                 
                 # Tạo keyboard
                 keyboard = []
@@ -2224,10 +2224,10 @@ class BotManager:
             parts = text.replace("⛔ Coin: ", "").split(" | Bot: ")
             if len(parts) == 2:
                 symbol = parts[0].strip()
-                telegram_chat_id = parts[1].strip()
+                bot_id = parts[1].strip()
                 
-                if self.stop_bot_symbol(telegram_chat_id, symbol):
-                    send_telegram(f"✅ Đã dừng coin {symbol} trong bot {telegram_chat_id}", chat_id,
+                if self.stop_bot_symbol(bot_id, symbol):
+                    send_telegram(f"✅ Đã dừng coin {symbol} trong bot {bot_id}", chat_id,
                                 self.telegram_bot_token, self.telegram_chat_id)
                 else:
                     send_telegram(f"❌ Không thể dừng coin {symbol}", chat_id,
@@ -2243,12 +2243,12 @@ class BotManager:
         
         # XỬ LÝ LỆNH DỪNG BOT
         elif text.startswith("⛔ Bot: "):
-            telegram_chat_id = text.replace("⛔ Bot: ", "").strip()
-            if self.stop_bot(telegram_chat_id):
-                send_telegram(f"✅ Đã dừng bot {telegram_chat_id}", chat_id,
+            bot_id = text.replace("⛔ Bot: ", "").strip()
+            if self.stop_bot(bot_id):
+                send_telegram(f"✅ Đã dừng bot {bot_id}", chat_id,
                             self.telegram_bot_token, self.telegram_chat_id)
             else:
-                send_telegram(f"❌ Không tìm thấy bot {telegram_chat_id}", chat_id,
+                send_telegram(f"❌ Không tìm thấy bot {bot_id}", chat_id,
                             self.telegram_bot_token, self.telegram_chat_id)
             return
         
