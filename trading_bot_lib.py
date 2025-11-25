@@ -1399,7 +1399,7 @@ class BaseBot:
             close_qty = abs(self.symbol_data[symbol]['qty'])
             
             cancel_all_orders(symbol, self.api_key, self.api_secret)
-            time.sleep(01)
+            time.sleep(1)
             
             result = place_order(symbol, close_side, close_qty, self.api_key, self.api_secret)
             if result and 'orderId' in result:
