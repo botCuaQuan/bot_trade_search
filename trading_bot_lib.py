@@ -750,70 +750,70 @@ class SmartCoinFinder:
             logger.error(f"Lỗi phân tích RSI {symbol}: {str(e)}")
             return None
     
-        def find_best_coin_any_signal(self, excluded_coins=None, required_leverage=10):
-            """
-            Tìm coin tốt nhất với bất kỳ tín hiệu nào (BUY / SELL),
-            nhưng có cooldown + giới hạn số coin để tránh spam request.
-            """
-            try:
-                now = time.time()
-    
-                # Cooldown: nếu vừa scan < scan_cooldown giây thì thôi, không scan tiếp
-                if now - getattr(self, "last_scan_time", 0) < getattr(self, "scan_cooldown", 30):
-                    logger.info("⏳ Vừa scan coin xong, đợi cooldown trước khi scan lại")
-                    return None
-    
-                self.last_scan_time = now
-    
-                # Lấy danh sách USDC (đã có cache 5 phút)
-                all_symbols = get_all_usdc_pairs(limit=15)   # ↓ từ 50 xuống 15
-                if not all_symbols:
-                    return None
-    
-                valid_symbols = []
-    
-                for symbol in all_symbols:
-                    # Bị loại trừ
-                    if excluded_coins and symbol in excluded_coins:
-                        continue
-    
-                    # Đã có vị thế trên Binance
-                    if self.has_existing_position(symbol):
-                        logger.info(f"🚫 Bỏ qua {symbol} - đã có vị thế trên Binance")
-                        continue
-    
-                    # Đòn bẩy tối đa không đủ
-                    max_lev = self.get_symbol_leverage(symbol)
-                    if max_lev < required_leverage:
-                        continue
-    
-                    # Thêm delay nhỏ để không spam /klines
-                    time.sleep(0.1)
-    
-                    # Lấy tín hiệu vào lệnh
-                    entry_signal = self.get_entry_signal(symbol)
-                    if entry_signal in ["BUY", "SELL"]:
-                        valid_symbols.append((symbol, entry_signal))
-                        logger.info(f"✅ Tìm thấy coin có tín hiệu: {symbol} - Tín hiệu: {entry_signal}")
-    
-                if not valid_symbols:
-                    logger.info("❌ Không tìm thấy coin nào có tín hiệu")
-                    return None
-    
-                # Chọn ngẫu nhiên một coin trong danh sách hợp lệ
-                selected_symbol, _ = random.choice(valid_symbols)
-    
-                # Kiểm tra lại lần cuối: nếu vừa có vị thế thì bỏ
-                if self.has_existing_position(selected_symbol):
-                    logger.info(f"🚫 {selected_symbol} có vị thế sau khi chọn, bỏ qua.")
-                    return None
-    
-                logger.info(f"🎯 Chọn coin để trade: {selected_symbol}")
-                return selected_symbol
-    
-            except Exception as e:
-                logger.error(f"❌ Lỗi find_best_coin_any_signal: {str(e)}")
+    def find_best_coin_any_signal(self, excluded_coins=None, required_leverage=10):
+        """
+        Tìm coin tốt nhất với bất kỳ tín hiệu nào (BUY / SELL),
+        nhưng có cooldown + giới hạn số coin để tránh spam request.
+        """
+        try:
+            now = time.time()
+
+            # Cooldown: nếu vừa scan < scan_cooldown giây thì thôi, không scan tiếp
+            if now - getattr(self, "last_scan_time", 0) < getattr(self, "scan_cooldown", 30):
+                logger.info("⏳ Vừa scan coin xong, đợi cooldown trước khi scan lại")
                 return None
+
+            self.last_scan_time = now
+
+            # Lấy danh sách USDC (đã có cache 5 phút)
+            all_symbols = get_all_usdc_pairs(limit=15)   # ↓ từ 50 xuống 15
+            if not all_symbols:
+                return None
+
+            valid_symbols = []
+
+            for symbol in all_symbols:
+                # Bị loại trừ
+                if excluded_coins and symbol in excluded_coins:
+                    continue
+
+                # Đã có vị thế trên Binance
+                if self.has_existing_position(symbol):
+                    logger.info(f"🚫 Bỏ qua {symbol} - đã có vị thế trên Binance")
+                    continue
+
+                # Đòn bẩy tối đa không đủ
+                max_lev = self.get_symbol_leverage(symbol)
+                if max_lev < required_leverage:
+                    continue
+
+                # Thêm delay nhỏ để không spam /klines
+                time.sleep(0.1)
+
+                # Lấy tín hiệu vào lệnh
+                entry_signal = self.get_entry_signal(symbol)
+                if entry_signal in ["BUY", "SELL"]:
+                    valid_symbols.append((symbol, entry_signal))
+                    logger.info(f"✅ Tìm thấy coin có tín hiệu: {symbol} - Tín hiệu: {entry_signal}")
+
+            if not valid_symbols:
+                logger.info("❌ Không tìm thấy coin nào có tín hiệu")
+                return None
+
+            # Chọn ngẫu nhiên một coin trong danh sách hợp lệ
+            selected_symbol, _ = random.choice(valid_symbols)
+
+            # Kiểm tra lại lần cuối: nếu vừa có vị thế thì bỏ
+            if self.has_existing_position(selected_symbol):
+                logger.info(f"🚫 {selected_symbol} có vị thế sau khi chọn, bỏ qua.")
+                return None
+
+            logger.info(f"🎯 Chọn coin để trade: {selected_symbol}")
+            return selected_symbol
+
+        except Exception as e:
+            logger.error(f"❌ Lỗi find_best_coin_any_signal: {str(e)}")
+            return None
 
     def get_entry_signal(self, symbol):
         """Tín hiệu vào lệnh - khối lượng 20%"""
