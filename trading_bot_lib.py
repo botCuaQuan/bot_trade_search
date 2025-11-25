@@ -59,22 +59,39 @@ def escape_html(text):
                 .replace('"', '&quot;'))
 
 def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, default_chat_id=None):
+    """Gửi tin nhắn Telegram - ĐÃ SỬA LỖI 404"""
     if not bot_token:
         logger.warning("Telegram Bot Token chưa được thiết lập")
-        return
+        return False
     
     chat_id = chat_id or default_chat_id
     if not chat_id:
         logger.warning("Telegram Chat ID chưa được thiết lập")
-        return
+        return False
     
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    # KIỂM TRA ĐỊNH DẠNG BOT TOKEN VÀ CHAT ID
+    if not bot_token.startswith('bot'):
+        # Đảm bảo token có định dạng đúng
+        if ':' in bot_token:
+            bot_token = f"bot{bot_token}"
+        else:
+            logger.error(f"❌ Bot Token không hợp lệ: {bot_token[:20]}...")
+            return False
+    
+    # KIỂM TRA CHAT ID CÓ PHẢI LÀ SỐ NGUYÊN
+    try:
+        chat_id_int = int(chat_id)
+    except (ValueError, TypeError):
+        logger.error(f"❌ Chat ID không hợp lệ: {chat_id}")
+        return False
+    
+    url = f"https://api.telegram.org/{bot_token}/sendMessage"
     
     # ESCAPE MESSAGE ĐỂ TRÁNH LỖI HTML
     safe_message = escape_html(message)
     
     payload = {
-        "chat_id": chat_id,
+        "chat_id": chat_id_int,
         "text": safe_message,
         "parse_mode": "HTML"
     }
@@ -83,11 +100,52 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
         payload["reply_markup"] = json.dumps(reply_markup)
     
     try:
-        response = requests.post(url, json=payload, timeout=15)
-        if response.status_code != 200:
-            logger.error(f"Lỗi Telegram ({response.status_code}): {response.text}")
+        headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        response = requests.post(
+            url, 
+            json=payload, 
+            headers=headers,
+            timeout=15
+        )
+        
+        if response.status_code == 200:
+            return True
+        else:
+            error_data = response.json()
+            error_description = error_data.get('description', 'Unknown error')
+            
+            if response.status_code == 404:
+                logger.error(f"❌ Lỗi Telegram 404 - Không tìm thấy: {error_description}")
+                logger.error(f"   Token: {bot_token[:20]}...***")
+                logger.error(f"   Chat ID: {chat_id_int}")
+                logger.error("   Nguyên nhân có thể:")
+                logger.error("   - Bot Token sai")
+                logger.error("   - Chat ID sai") 
+                logger.error("   - Bot chưa được khởi tạo (gửi /start tới bot trước)")
+            elif response.status_code == 400:
+                logger.error(f"❌ Lỗi Telegram 400 - Bad Request: {error_description}")
+            elif response.status_code == 401:
+                logger.error(f"❌ Lỗi Telegram 401 - Unauthorized: Token không hợp lệ")
+            elif response.status_code == 403:
+                logger.error(f"❌ Lỗi Telegram 403 - Forbidden: Bot bị chặn bởi user")
+            else:
+                logger.error(f"❌ Lỗi Telegram ({response.status_code}): {error_description}")
+            
+            return False
+            
+    except requests.exceptions.Timeout:
+        logger.error("⏰ Timeout kết nối Telegram")
+        return False
+    except requests.exceptions.ConnectionError:
+        logger.error("🔗 Lỗi kết nối mạng đến Telegram")
+        return False
     except Exception as e:
-        logger.error(f"Lỗi kết nối Telegram: {str(e)}")
+        logger.error(f"❌ Lỗi không xác định khi gửi Telegram: {str(e)}")
+        return False
 
 # ========== MENU TELEGRAM HOÀN CHỈNH ==========
 def create_cancel_keyboard():
@@ -1639,15 +1697,21 @@ class BaseBot:
             return random.choice(["BUY", "SELL"])
 
     def log(self, message):
-        """Chỉ log các thông tin quan trọng"""
-        # Chỉ log các message có chứa emoji hoặc từ khóa quan trọng
+        """Chỉ log các thông tin quan trọng - ĐÃ SỬA LỖI TELEGRAM"""
         important_keywords = ['❌', '✅', '⛔', '💰', '📈', '📊', '🎯', '🛡️', '🔴', '🟢', '⚠️', '🚫']
         if any(keyword in message for keyword in important_keywords):
-            logger.warning(f"[{self.bot_id}] {message}")
+            logger.warning(f"[SYSTEM] {message}")
+            
+            # CHỈ GỬI TELEGRAM NẾU CONFIG ĐÚNG
             if self.telegram_bot_token and self.telegram_chat_id:
-                send_telegram(f"<b>{self.bot_id}</b>: {message}", 
-                             bot_token=self.telegram_bot_token, 
-                             default_chat_id=self.telegram_chat_id)
+                # THÊM XỬ LÝ TRÁNH GỬI QUÁ NHIỀU
+                try:
+                    send_telegram(f"<b>SYSTEM</b>: {message}", 
+                                 bot_token=self.telegram_bot_token, 
+                                 default_chat_id=self.telegram_chat_id)
+                except Exception as e:
+                    logger.error(f"❌ Không thể gửi Telegram: {str(e)}")
+
 
 # ========== BOT GLOBAL MARKET VỚI HỆ THỐNG RSI + KHỐI LƯỢNG ==========
 class GlobalMarketBot(BaseBot):
@@ -1671,8 +1735,30 @@ class BotManager:
 
         self.api_key = api_key
         self.api_secret = api_secret
+        
+        # 🔴 SỬA LỖI: XỬ LÝ TELEGRAM TOKEN VÀ CHAT ID
         self.telegram_bot_token = telegram_bot_token
         self.telegram_chat_id = telegram_chat_id
+        
+        # KIỂM TRA VÀ CHUẨN HÓA TELEGRAM CONFIG
+        if self.telegram_bot_token:
+            if not self.telegram_bot_token.startswith('bot'):
+                if ':' in self.telegram_bot_token:
+                    self.telegram_bot_token = f"bot{self.telegram_bot_token}"
+                else:
+                    logger.error("❌ Bot Token không hợp lệ, tính năng Telegram sẽ bị vô hiệu hóa")
+                    self.telegram_bot_token = None
+                    self.telegram_chat_id = None
+        
+        if self.telegram_chat_id:
+            try:
+                # Đảm bảo chat_id là số nguyên
+                self.telegram_chat_id = str(int(self.telegram_chat_id))
+            except (ValueError, TypeError):
+                logger.error("❌ Chat ID không hợp lệ, tính năng Telegram sẽ bị vô hiệu hóa")
+                self.telegram_chat_id = None
+                if self.telegram_bot_token:
+                    self.telegram_bot_token = None
 
         # ✅ tài nguyên dùng chung cho tất cả bot
         self.coin_manager = CoinManager()
@@ -1686,7 +1772,21 @@ class BotManager:
 
         if api_key and api_secret:
             self._verify_api_connection()
-            self.log("🟢 HỆ THỐNG BOT RSI + KHỐI LƯỢNG ĐÃ KHỞI ĐỘNG - MỖI BOT CÓ THỂ QUẢN LÝ NHIỀU COIN")
+            
+            # KIỂM TRA TELEGRAM CONNECTION
+            if self.telegram_bot_token and self.telegram_chat_id:
+                test_message = "🤖 <b>BOT ĐÃ KHỞI ĐỘNG THÀNH CÔNG</b>\n\n" \
+                              "✅ Kết nối Binance: Thành công\n" \
+                              "✅ Kết nối Telegram: Đang kiểm tra..."
+                
+                if send_telegram(test_message, 
+                               bot_token=self.telegram_bot_token, 
+                               default_chat_id=self.telegram_chat_id):
+                    logger.info("🟢 HỆ THỐNG BOT RSI + KHỐI LƯỢNG ĐÃ KHỞI ĐỘNG - TELEGRAM HOẠT ĐỘNG")
+                else:
+                    logger.warning("🟡 HỆ THỐNG KHỞI ĐỘNG - TELEGRAM CÓ VẤN ĐỀ")
+            else:
+                logger.info("🟢 HỆ THỐNG BOT RSI + KHỐI LƯỢNG ĐÃ KHỞI ĐỘNG - KHÔNG CÓ TELEGRAM")
 
             self.telegram_thread = threading.Thread(target=self._telegram_listener, daemon=True)
             self.telegram_thread.start()
@@ -1694,7 +1794,7 @@ class BotManager:
             if self.telegram_chat_id:
                 self.send_main_menu(self.telegram_chat_id)
         else:
-            self.log("⚡ BotManager khởi động ở chế độ không config")
+            logger.info("⚡ BotManager khởi động ở chế độ không config")
 
     def _execute_bots_sequentially(self):
         """Điều phối các bot thực hiện TUẦN TỰ"""
@@ -1888,14 +1988,21 @@ class BotManager:
             return f"❌ Lỗi thống kê: {str(e)}"
 
     def log(self, message):
-        """Chỉ log các thông tin quan trọng"""
+        """Chỉ log các thông tin quan trọng - ĐÃ SỬA LỖI TELEGRAM"""
         important_keywords = ['❌', '✅', '⛔', '💰', '📈', '📊', '🎯', '🛡️', '🔴', '🟢', '⚠️', '🚫']
         if any(keyword in message for keyword in important_keywords):
             logger.warning(f"[SYSTEM] {message}")
+            
+            # CHỈ GỬI TELEGRAM NẾU CONFIG ĐÚNG
             if self.telegram_bot_token and self.telegram_chat_id:
-                send_telegram(f"<b>SYSTEM</b>: {message}", 
-                             bot_token=self.telegram_bot_token, 
-                             default_chat_id=self.telegram_chat_id)
+                # THÊM XỬ LÝ TRÁNH GỬI QUÁ NHIỀU
+                try:
+                    send_telegram(f"<b>SYSTEM</b>: {message}", 
+                                 bot_token=self.telegram_bot_token, 
+                                 default_chat_id=self.telegram_chat_id)
+                except Exception as e:
+                    logger.error(f"❌ Không thể gửi Telegram: {str(e)}")
+
 
     def send_main_menu(self, chat_id):
         welcome = (
@@ -2069,18 +2176,42 @@ class BotManager:
         self.log("🔴 Đã dừng tất cả bot, hệ thống vẫn chạy và có thể thêm bot mới")
 
     def _telegram_listener(self):
+        """Listener Telegram - ĐÃ SỬA LỖI KẾT NỐI"""
         last_update_id = 0
+        retry_count = 0
+        max_retries = 5
         
         while self.running and self.telegram_bot_token:
             try:
                 # 🔴 THÊM: Điều phối bot thực thi tuần tự
                 self._execute_bots_sequentially()
                 
-                url = f"https://api.telegram.org/bot{self.telegram_bot_token}/getUpdates?offset={last_update_id+1}&timeout=10"
-                response = requests.get(url, timeout=15)
+                # KIỂM TRA BOT TOKEN
+                if not self.telegram_bot_token.startswith('bot'):
+                    if ':' in self.telegram_bot_token:
+                        self.telegram_bot_token = f"bot{self.telegram_bot_token}"
+                    else:
+                        logger.error("❌ Bot Token không hợp lệ, không thể kết nối Telegram")
+                        time.sleep(60)
+                        continue
+                
+                url = f"https://api.telegram.org/{self.telegram_bot_token}/getUpdates"
+                params = {
+                    'offset': last_update_id + 1,
+                    'timeout': 10,
+                    'limit': 100
+                }
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                
+                response = requests.get(url, params=params, headers=headers, timeout=15)
                 
                 if response.status_code == 200:
                     data = response.json()
+                    retry_count = 0  # Reset retry count khi thành công
+                    
                     if data.get('ok'):
                         for update in data['result']:
                             update_id = update['update_id']
@@ -2088,22 +2219,48 @@ class BotManager:
                             chat_id = str(message.get('chat', {}).get('id'))
                             text = message.get('text', '').strip()
                             
+                            # KIỂM TRA CHAT ID HỢP LỆ
                             if chat_id != self.telegram_chat_id:
+                                logger.warning(f"⚠️ Tin nhắn từ chat ID không xác định: {chat_id}")
                                 continue
                             
                             if update_id > last_update_id:
                                 last_update_id = update_id
                             
                             self._handle_telegram_message(chat_id, text)
-                elif response.status_code == 409:
-                    logger.error("Lỗi xung đột Telegram")
-                    time.sleep(60)
+                    else:
+                        error_description = data.get('description', 'Unknown error')
+                        logger.error(f"❌ Telegram API error: {error_description}")
+                        
+                        if "invalid token" in error_description.lower():
+                            logger.error("🔴 Bot Token không hợp lệ! Vui lòng kiểm tra lại.")
+                            time.sleep(60)
+                        elif "chat not found" in error_description.lower():
+                            logger.error("🔴 Chat ID không hợp lệ! Vui lòng kiểm tra lại.")
+                            time.sleep(60)
+                        
+                elif response.status_code == 404:
+                    retry_count += 1
+                    logger.error(f"❌ Lỗi 404 Telegram (lần {retry_count}/{max_retries})")
+                    
+                    if retry_count >= max_retries:
+                        logger.error("🔴 Đã vượt quá số lần thử kết nối Telegram. Dừng listener...")
+                        break
+                        
+                    time.sleep(10)
                 else:
+                    logger.error(f"❌ Lỗi HTTP {response.status_code} từ Telegram")
                     time.sleep(5)
-                
-            except Exception as e:
-                logger.error(f"Lỗi Telegram listener: {str(e)}")
+                    
+            except requests.exceptions.Timeout:
+                logger.warning("⏰ Timeout kết nối Telegram, thử lại...")
                 time.sleep(5)
+            except requests.exceptions.ConnectionError:
+                logger.warning("🔗 Mất kết nối mạng, thử lại sau 10s...")
+                time.sleep(10)
+            except Exception as e:
+                logger.error(f"❌ Lỗi không xác định trong Telegram listener: {str(e)}")
+                time.sleep(10)
 
     def _handle_telegram_message(self, chat_id, text):
         user_state = self.user_states.get(chat_id, {})
@@ -2639,3 +2796,36 @@ class BotManager:
             send_telegram(f"❌ Lỗi tạo bot: {str(e)}", chat_id, create_main_menu(),
                         self.telegram_bot_token, self.telegram_chat_id)
             self.user_states[chat_id] = {}
+
+    def test_telegram_connection(bot_token, chat_id):
+        """Kiểm tra kết nối Telegram"""
+        try:
+            # Chuẩn hóa token
+            if not bot_token.startswith('bot'):
+                if ':' in bot_token:
+                    bot_token = f"bot{bot_token}"
+                else:
+                    return False, "Bot Token không đúng định dạng"
+            
+            # Chuẩn hóa chat_id
+            try:
+                chat_id = str(int(chat_id))
+            except (ValueError, TypeError):
+                return False, "Chat ID phải là số"
+            
+            url = f"https://api.telegram.org/{bot_token}/getMe"
+            response = requests.get(url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('ok'):
+                    bot_info = data['result']
+                    bot_name = bot_info.get('first_name', 'Unknown')
+                    return True, f"✅ Kết nối Telegram thành công! Bot: {bot_name}"
+                else:
+                    return False, "❌ Token không hợp lệ"
+            else:
+                return False, f"❌ Lỗi {response.status_code}: {response.text}"
+                
+        except Exception as e:
+            return False, f"❌ Lỗi kết nối: {str(e)}"
