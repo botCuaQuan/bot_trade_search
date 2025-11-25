@@ -1479,7 +1479,7 @@ class BaseBot:
         """Kiểm tra nhồi lệnh với điều kiện ROI ÂM thực tế"""
         if (not self.symbol_data[symbol]['position_open'] or 
             not self.symbol_data[symbol]['entry_base'] or 
-            self.symbol_data[symbol]['average_down_count'] >= 77):  # Giới hạn 5 lần nhồi
+            self.symbol_data[symbol]['average_down_count'] >= 7):  # Giới hạn 5 lần nhồi
             return
             
         try:
