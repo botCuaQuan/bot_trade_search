@@ -935,7 +935,7 @@ class BaseBot:
         # Biến để quản lý tuần tự
         self.current_processing_symbol = None
         self.last_trade_completion_time = 0
-        self.trade_cooldown = 3  # Chờ 3s sau mỗi lệnh
+        self.trade_cooldown = 60  # Chờ 3s sau mỗi lệnh
 
         # Quản lý thời gian
         self.last_global_position_check = 0
@@ -978,7 +978,7 @@ class BaseBot:
                 
                 # KIỂM TRA COOLDOWN TRƯỚC KHI THỰC THI
                 if current_time - self.last_execution_time < self.execution_cooldown:
-                    time.sleep(0.1)
+                    time.sleep(1)
                     continue
                     
                 # KIỂM TRA VỊ THẾ TOÀN TÀI KHOẢN ĐỊNH KỲ
@@ -991,7 +991,7 @@ class BaseBot:
                     with self.execution_lock:
                         if self._find_and_add_new_coin():
                             self.last_execution_time = current_time
-                    time.sleep(1)
+                    time.sleep(3)
                     continue
                 
                 # XỬ LÝ COIN DUY NHẤT CỦA BOT
@@ -1009,7 +1009,7 @@ class BaseBot:
                 if time.time() - self.last_error_log_time > 10:
                     self.log(f"❌ Lỗi hệ thống: {str(e)}")
                     self.last_error_log_time = time.time()
-                time.sleep(1)
+                time.sleep(10)
 
     def _process_single_symbol(self, symbol):
         """Xử lý một symbol duy nhất - HỆ THỐNG RSI + KHỐI LƯỢNG MỚI"""
@@ -1315,7 +1315,7 @@ class BaseBot:
                 return False
 
             cancel_all_orders(symbol, self.api_key, self.api_secret)
-            time.sleep(0.2)
+            time.sleep(1)
 
             result = place_order(symbol, side, qty, self.api_key, self.api_secret)
             if result and 'orderId' in result:
@@ -1399,7 +1399,7 @@ class BaseBot:
             close_qty = abs(self.symbol_data[symbol]['qty'])
             
             cancel_all_orders(symbol, self.api_key, self.api_secret)
-            time.sleep(0.5)
+            time.sleep(01)
             
             result = place_order(symbol, close_side, close_qty, self.api_key, self.api_secret)
             if result and 'orderId' in result:
@@ -1617,7 +1617,7 @@ class BaseBot:
         if self.current_processing_symbol == symbol:
             timeout = time.time() + 10
             while self.current_processing_symbol == symbol and time.time() < timeout:
-                time.sleep(0.5)
+                time.sleep(1)
         
         # Đóng vị thế nếu đang mở
         if self.symbol_data[symbol]['position_open']:
