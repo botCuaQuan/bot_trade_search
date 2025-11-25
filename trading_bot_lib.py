@@ -20,6 +20,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 import time
 import ssl
+# ========== RATE LIMIT CHO BINANCE ==========
+_BINANCE_LAST_REQUEST_TIME = 0
+_BINANCE_RATE_LOCK = threading.Lock()
+# Khoảng cách tối thiểu giữa 2 request: 0.25s ~ 4 request/giây cho toàn bộ bot
+_BINANCE_MIN_INTERVAL = 0.25  
+
+def _wait_for_rate_limit():
+    """Đảm bảo không spam quá nhiều request/giây (toàn cục)."""
+    global _BINANCE_LAST_REQUEST_TIME
+    with _BINANCE_RATE_LOCK:
+        now = time.time()
+        delta = now - _BINANCE_LAST_REQUEST_TIME
+        if delta < _BINANCE_MIN_INTERVAL:
+            time.sleep(_BINANCE_MIN_INTERVAL - delta)
+        _BINANCE_LAST_REQUEST_TIME = time.time()
+
 
 # ========== BYPASS SSL VERIFICATION ==========
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -250,16 +266,29 @@ def sign(query, api_secret):
         return ""
 
 def binance_api_request(url, method='GET', params=None, headers=None):
+    """Gửi request tới Binance với rate limit + retry an toàn hơn."""
     max_retries = 3
+    base_url = url  # Giữ lại URL gốc để lần retry không bị nối query nhiều lần
+
     for attempt in range(max_retries):
         try:
-            # Thêm User-Agent để tránh bị chặn
+            # Đợi theo rate limit toàn cục
+            _wait_for_rate_limit()
+
+            # Reset lại URL cho mỗi lần thử
+            url = base_url
+
             if headers is None:
                 headers = {}
-            
+
+            # Thêm User-Agent để tránh bị chặn
             if 'User-Agent' not in headers:
-                headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            
+                headers['User-Agent'] = (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36'
+                )
+
+            # Chuẩn bị request
             if method.upper() == 'GET':
                 if params:
                     query = urllib.parse.urlencode(params)
@@ -268,65 +297,88 @@ def binance_api_request(url, method='GET', params=None, headers=None):
             else:
                 data = urllib.parse.urlencode(params).encode() if params else None
                 req = urllib.request.Request(url, data=data, headers=headers, method=method)
-            
-            # Tăng timeout và thêm retry logic
+
+            # Gửi request
             with urllib.request.urlopen(req, timeout=30) as response:
                 if response.status == 200:
                     return json.loads(response.read().decode())
                 else:
                     error_content = response.read().decode()
                     logger.error(f"Lỗi API ({response.status}): {error_content}")
+
                     if response.status == 401:
+                        # Key sai / quyền hạn, không retry vô nghĩa
                         return None
+
                     if response.status == 429:
-                        time.sleep(2 ** attempt)
+                        # Too Many Requests → exponential backoff
+                        sleep_time = 2 ** attempt
+                        logger.warning(f"⚠️ 429 Too Many Requests, ngủ {sleep_time}s rồi thử lại")
+                        time.sleep(sleep_time)
                     elif response.status >= 500:
+                        # Lỗi server Binance → chờ 1s rồi thử lại
                         time.sleep(1)
+
+                    # Các mã khác coi như lỗi, chuyển sang lần thử tiếp theo
                     continue
-                    
+
         except urllib.error.HTTPError as e:
+            # Xử lý riêng case 451 như bạn đang làm
             if e.code == 451:
-                logger.error(f"❌ Lỗi 451: Truy cập bị chặn - Có thể do hạn chế địa lý. Vui lòng kiểm tra VPN/proxy.")
-                # Thử sử dụng endpoint thay thế
-                if "fapi.binance.com" in url:
-                    new_url = url.replace("fapi.binance.com", "fapi.binance.com")
-                    logger.info(f"Thử URL thay thế: {new_url}")
+                logger.error("❌ Lỗi 451: Truy cập bị chặn - Có thể do hạn chế địa lý. Vui lòng kiểm tra VPN/proxy.")
                 return None
             else:
                 logger.error(f"Lỗi HTTP ({e.code}): {e.reason}")
-            
+
             if e.code == 401:
                 return None
             if e.code == 429:
-                time.sleep(2 ** attempt)
+                sleep_time = 2 ** attempt
+                logger.warning(f"⚠️ HTTP 429 Too Many Requests, ngủ {sleep_time}s rồi thử lại")
+                time.sleep(sleep_time)
             elif e.code >= 500:
                 time.sleep(1)
+
             continue
-                
+
         except Exception as e:
             logger.error(f"Lỗi kết nối API (lần {attempt + 1}): {str(e)}")
             time.sleep(1)
-    
+
     logger.error(f"Không thể thực hiện yêu cầu API sau {max_retries} lần thử")
     return None
 
 def get_all_usdc_pairs(limit=100):
+    """Lấy danh sách các symbol USDC, có cache 5 phút."""
+    global _USDC_CACHE
     try:
-        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-        data = binance_api_request(url)
-        if not data:
-            logger.warning("Không lấy được dữ liệu từ Binance, trả về danh sách rỗng")
-            return []
-        
-        usdc_pairs = []
-        for symbol_info in data.get('symbols', []):
-            symbol = symbol_info.get('symbol', '')
-            if symbol.endswith('USDC') and symbol_info.get('status') == 'TRADING':
-                usdc_pairs.append(symbol)
-        
-        logger.info(f"✅ Lấy được {len(usdc_pairs)} coin USDC từ Binance")
-        return usdc_pairs[:limit] if limit else usdc_pairs
-        
+        now = time.time()
+
+        # Dùng cache nếu còn hạn
+        if _USDC_CACHE["pairs"] and (now - _USDC_CACHE["last_update"] < _USDC_CACHE_TTL):
+            pairs = _USDC_CACHE["pairs"]
+        else:
+            url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+            data = binance_api_request(url)
+            if not data:
+                logger.warning("Không lấy được dữ liệu từ Binance, trả về danh sách rỗng")
+                return []
+
+            usdc_pairs = []
+            for symbol_info in data.get('symbols', []):
+                symbol = symbol_info.get('symbol', '')
+                if symbol.endswith('USDC') and symbol_info.get('status') == 'TRADING':
+                    usdc_pairs.append(symbol)
+
+            _USDC_CACHE["pairs"] = usdc_pairs
+            _USDC_CACHE["last_update"] = now
+            logger.info(f"✅ Lấy được {len(usdc_pairs)} coin USDC từ Binance (cache 5 phút)")
+
+            pairs = usdc_pairs
+
+        # Giới hạn số coin trả về
+        return pairs[:limit]
+
     except Exception as e:
         logger.error(f"❌ Lỗi lấy danh sách coin từ Binance: {str(e)}")
         return []
@@ -568,6 +620,8 @@ class SmartCoinFinder:
     def __init__(self, api_key, api_secret):
         self.api_key = api_key
         self.api_secret = api_secret
+        self.last_scan_time = 0       # lần cuối cùng scan coin
+        self.scan_cooldown = 30  
         
     def get_symbol_leverage(self, symbol):
         """Lấy đòn bẩy tối đa của symbol"""
@@ -696,55 +750,71 @@ class SmartCoinFinder:
             logger.error(f"Lỗi phân tích RSI {symbol}: {str(e)}")
             return None
     
-    def find_best_coin_any_signal(self, excluded_coins=None, required_leverage=10):
-        """Tìm coin tốt nhất với bất kỳ tín hiệu nào - không ép hướng cụ thể"""
-        try:
-            all_symbols = get_all_usdc_pairs(limit=50)
-            if not all_symbols:
+        def find_best_coin_any_signal(self, excluded_coins=None, required_leverage=10):
+            """
+            Tìm coin tốt nhất với bất kỳ tín hiệu nào (BUY / SELL),
+            nhưng có cooldown + giới hạn số coin để tránh spam request.
+            """
+            try:
+                now = time.time()
+    
+                # Cooldown: nếu vừa scan < scan_cooldown giây thì thôi, không scan tiếp
+                if now - getattr(self, "last_scan_time", 0) < getattr(self, "scan_cooldown", 30):
+                    logger.info("⏳ Vừa scan coin xong, đợi cooldown trước khi scan lại")
+                    return None
+    
+                self.last_scan_time = now
+    
+                # Lấy danh sách USDC (đã có cache 5 phút)
+                all_symbols = get_all_usdc_pairs(limit=15)   # ↓ từ 50 xuống 15
+                if not all_symbols:
+                    return None
+    
+                valid_symbols = []
+    
+                for symbol in all_symbols:
+                    # Bị loại trừ
+                    if excluded_coins and symbol in excluded_coins:
+                        continue
+    
+                    # Đã có vị thế trên Binance
+                    if self.has_existing_position(symbol):
+                        logger.info(f"🚫 Bỏ qua {symbol} - đã có vị thế trên Binance")
+                        continue
+    
+                    # Đòn bẩy tối đa không đủ
+                    max_lev = self.get_symbol_leverage(symbol)
+                    if max_lev < required_leverage:
+                        continue
+    
+                    # Thêm delay nhỏ để không spam /klines
+                    time.sleep(0.1)
+    
+                    # Lấy tín hiệu vào lệnh
+                    entry_signal = self.get_entry_signal(symbol)
+                    if entry_signal in ["BUY", "SELL"]:
+                        valid_symbols.append((symbol, entry_signal))
+                        logger.info(f"✅ Tìm thấy coin có tín hiệu: {symbol} - Tín hiệu: {entry_signal}")
+    
+                if not valid_symbols:
+                    logger.info("❌ Không tìm thấy coin nào có tín hiệu")
+                    return None
+    
+                # Chọn ngẫu nhiên một coin trong danh sách hợp lệ
+                selected_symbol, _ = random.choice(valid_symbols)
+    
+                # Kiểm tra lại lần cuối: nếu vừa có vị thế thì bỏ
+                if self.has_existing_position(selected_symbol):
+                    logger.info(f"🚫 {selected_symbol} có vị thế sau khi chọn, bỏ qua.")
+                    return None
+    
+                logger.info(f"🎯 Chọn coin để trade: {selected_symbol}")
+                return selected_symbol
+    
+            except Exception as e:
+                logger.error(f"❌ Lỗi find_best_coin_any_signal: {str(e)}")
                 return None
-            
-            valid_symbols = []
-            
-            for symbol in all_symbols:
-                # Kiểm tra coin đã bị loại trừ
-                if excluded_coins and symbol in excluded_coins:
-                    continue
-                
-                # 🔴 QUAN TRỌNG: Kiểm tra coin đã có vị thế trên Binance
-                if self.has_existing_position(symbol):
-                    logger.info(f"🚫 Bỏ qua {symbol} - đã có vị thế trên Binance")
-                    continue
-                
-                # Kiểm tra đòn bẩy
-                max_lev = self.get_symbol_leverage(symbol)
-                if max_lev < required_leverage:
-                    continue
-                
-                # 🔴 TÌM COIN CÓ TÍN HIỆU BẤT KỲ (BUY hoặc SELL)
-                entry_signal = self.get_entry_signal(symbol)
-                if entry_signal in ["BUY", "SELL"]:
-                    valid_symbols.append((symbol, entry_signal))
-                    logger.info(f"✅ Tìm thấy coin có tín hiệu: {symbol} - Tín hiệu: {entry_signal}")
-            
-            if not valid_symbols:
-                logger.info("❌ Không tìm thấy coin nào có tín hiệu")
-                return None
-            
-            # Chọn ngẫu nhiên từ danh sách hợp lệ
-            selected_symbol, signal = random.choice(valid_symbols)
-            max_lev = self.get_symbol_leverage(selected_symbol)
-            
-            # 🔴 KIỂM TRA LẦN CUỐI: Đảm bảo coin được chọn không có vị thế
-            if self.has_existing_position(selected_symbol):
-                logger.info(f"🚫 {selected_symbol} - Coin được chọn đã có vị thế, bỏ qua")
-                return None
-            
-            logger.info(f"✅ Đã chọn coin: {selected_symbol} - Tín hiệu: {signal} - Đòn bẩy: {max_lev}x")
-            return selected_symbol
-            
-        except Exception as e:
-            logger.error(f"❌ Lỗi tìm coin: {str(e)}")
-            return None
+
     def get_entry_signal(self, symbol):
         """Tín hiệu vào lệnh - khối lượng 20%"""
         return self.get_rsi_signal(symbol, volume_threshold=20)
