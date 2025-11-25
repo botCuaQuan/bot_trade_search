@@ -1693,15 +1693,16 @@ class BotManager:
         self.coin_manager = CoinManager()
         self.symbol_locks = defaultdict(threading.Lock)
 
-        # 🔴 CƠ CHẾ NỐI TIẾP: Biến quản lý thứ tự vào lệnh của các bot
-        self.bot_execution_order = []
-        self.bot_execution_lock = threading.Lock()
+        # 🔴 CƠ CHẾ NỐI TIẾP THỰC SỰ - HÀNG ĐỢI TUẦN TỰ
+        self._bot_execution_queue = []           # Hàng đợi thứ tự bot
+        self._current_executing_bot = None       # Bot đang được chỉ định thực thi
+        self._queue_lock = threading.Lock()      # Lock cho hàng đợi
         self.last_bot_execution_time = 0
         self.bot_execution_cooldown = 3  # 3s giữa các bot
 
         if api_key and api_secret:
             self._verify_api_connection()
-            self.log("🟢 HỆ THỐNG BOT RSI + KHỐI LƯỢNG ĐÃ KHỞI ĐỘNG - CƠ CHẾ NỐI TIẾP HOÀN TOÀN")
+            self.log("🟢 HỆ THỐNG BOT RSI + KHỐI LƯỢNG ĐÃ KHỞI ĐỘNG - CƠ CHẾ NỐI TIẾP THỰC SỰ")
 
             self.telegram_thread = threading.Thread(target=self._telegram_listener, daemon=True)
             self.telegram_thread.start()
@@ -1712,7 +1713,7 @@ class BotManager:
             self.log("⚡ BotManager khởi động ở chế độ không config")
 
     def _execute_bots_sequentially(self):
-        """ĐIỀU PHỐI CÁC BOT THỰC HIỆN TUẦN TỰ - CƠ CHẾ NỐI TIẾP"""
+        """CƠ CHẾ NỐI TIẾP THỰC SỰ - HÀNG ĐỢI TUẦN TỰ CỐ ĐỊNH"""
         try:
             current_time = time.time()
             
@@ -1720,34 +1721,76 @@ class BotManager:
             if current_time - self.last_bot_execution_time < self.bot_execution_cooldown:
                 return
             
-            # TÌM BOT CÓ THỂ THỰC THI (không có coin và không đang xử lý)
-            available_bots = []
-            for bot_id, bot in self.bots.items():
-                if (not bot._stop and 
-                    hasattr(bot, 'active_symbols') and 
-                    len(bot.active_symbols) == 0 and
-                    hasattr(bot, 'is_processing') and 
-                    not bot.is_processing and
-                    current_time - getattr(bot, 'last_execution_time', 0) >= getattr(bot, 'execution_cooldown', 3)):
-                    available_bots.append((bot_id, bot))
+            # 🔴 QUAN TRỌNG: NẾU ĐANG CÓ BOT ĐƯỢC CHỈ ĐỊNH THỰC THI, KHÔNG CHỌN BOT KHÁC
+            if self._current_executing_bot:
+                # Kiểm tra bot được chỉ định còn active không
+                current_bot = self.bots.get(self._current_executing_bot)
+                if current_bot and not current_bot._stop and len(current_bot.active_symbols) == 0:
+                    if current_bot._find_and_add_new_coin():
+                        self.last_bot_execution_time = current_time
+                        self.log(f"🔁 Bot được chỉ định {self._current_executing_bot} đang tìm coin...")
+                    return
+                else:
+                    # Bot được chỉ định đã hoàn thành hoặc không còn active
+                    self._current_executing_bot = None
             
-            if not available_bots:
+            # 🔴 CẬP NHẬT HÀNG ĐỢI NẾU CẦN
+            self._update_execution_queue()
+            
+            if not self._bot_execution_queue:
                 return
             
-            # SẮP XẾP BOT THEO THỜI GIAN CHỜ (bot nào chờ lâu nhất được ưu tiên)
-            available_bots.sort(key=lambda x: x[1].last_execution_time)
+            # 🔴 CHỌN BOT THEO THỨ TỰ TRONG HÀNG ĐỢI - TUẦN TỰ
+            bot_id = self._bot_execution_queue[0]
+            bot = self.bots.get(bot_id)
             
-            # CHỌN BOT ĐẦU TIÊN VÀ KÍCH HOẠT
-            bot_id, bot_to_execute = available_bots[0]
+            if not bot or bot._stop:
+                # Bỏ qua bot không tồn tại hoặc đã dừng
+                self._bot_execution_queue.pop(0)
+                return
             
-            # KÍCH HOẠT BOT TÌM COIN MỚI
-            if hasattr(bot_to_execute, '_find_and_add_new_coin'):
-                if bot_to_execute._find_and_add_new_coin():
+            # KIỂM TRA ĐIỀU KIỆN THỰC THI
+            if (len(bot.active_symbols) == 0 and 
+                not getattr(bot, 'is_processing', False) and
+                current_time - getattr(bot, 'last_execution_time', 0) >= getattr(bot, 'execution_cooldown', 3)):
+                
+                # 🔴 CHỈ ĐỊNH BOT NÀY LÀ BOT ĐANG THỰC THI
+                self._current_executing_bot = bot_id
+                
+                # THỰC HIỆN TÌM COIN
+                if bot._find_and_add_new_coin():
                     self.last_bot_execution_time = current_time
-                    self.log(f"🔁 Đã kích hoạt bot {bot_id} tìm coin mới")
+                    self.log(f"🎯 Bot {bot_id} đang thực thi (thứ tự: 1/{len(self._bot_execution_queue)})")
+                
+                # 🔴 XOAY VÒNG HÀNG ĐỢI: chuyển bot hiện tại xuống cuối
+                with self._queue_lock:
+                    self._bot_execution_queue.append(self._bot_execution_queue.pop(0))
                     
         except Exception as e:
             self.log(f"❌ Lỗi điều phối bot: {str(e)}")
+            # Reset trạng thái nếu có lỗi
+            self._current_executing_bot = None
+
+    def _update_execution_queue(self):
+        """Cập nhật hàng đợi thực thi khi có bot mới/thay đổi"""
+        with self._queue_lock:
+            current_bots = set(self.bots.keys())
+            queue_bots = set(self._bot_execution_queue)
+            
+            # Thêm bot mới vào cuối hàng đợi
+            new_bots = current_bots - queue_bots
+            for bot_id in new_bots:
+                self._bot_execution_queue.append(bot_id)
+            
+            # Xóa bot không còn tồn tại
+            removed_bots = queue_bots - current_bots
+            for bot_id in removed_bots:
+                if bot_id in self._bot_execution_queue:
+                    self._bot_execution_queue.remove(bot_id)
+            
+            # Nếu bot đang thực thi không còn tồn tại, reset
+            if self._current_executing_bot and self._current_executing_bot not in current_bots:
+                self._current_executing_bot = None
 
     def _verify_api_connection(self):
         """Kiểm tra kết nối API"""
@@ -1848,7 +1891,7 @@ class BotManager:
                 bot_details.append(bot_info)
             
             # Tạo báo cáo
-            summary = "📊 **THỐNG KÊ CHI TIẾT - CƠ CHẾ NỐI TIẾP**\n\n"
+            summary = "📊 **THỐNG KÊ CHI TIẾT - CƠ CHẾ NỐI TIẾP THỰC SỰ**\n\n"
             
             # Phần 1: Số dư
             balance = get_balance(self.api_key, self.api_secret)
@@ -1891,21 +1934,45 @@ class BotManager:
                     
                     summary += "\n"
             
-            summary += "🔄 **CƠ CHẾ NỐI TIẾP**:\n"
-            summary += "• Mỗi bot quản lý 1 coin duy nhất\n"
-            summary += "• Các bot vào lệnh nối tiếp nhau\n"
-            summary += "• Tự động điều phối thứ tự thực thi\n"
-            summary += f"• Chờ {self.bot_execution_cooldown}s giữa các bot\n\n"
-            
-            summary += "⛔ **LỆNH DỪNG**:\n"
-            summary += "• '⛔ Quản lý Coin' để dừng từng coin\n"
-            summary += "• '⛔ Dừng Bot' để dừng từng bot\n"
-            summary += "• 'DỪNG TẤT CẢ BOT' - Dừng toàn bộ hệ thống\n"
+            # Phần 5: Trạng thái hàng đợi
+            summary += self.get_execution_queue_status()
             
             return summary
                     
         except Exception as e:
             return f"❌ Lỗi thống kê: {str(e)}"
+
+    def get_execution_queue_status(self):
+        """Lấy trạng thái hàng đợi thực thi"""
+        if not self._bot_execution_queue:
+            return "🔄 **HÀNG ĐỢI THỰC THI**: Chưa có bot trong hàng đợi\n\n"
+        
+        status = "🎪 **HÀNG ĐỢI THỰC THI NỐI TIẾP**\n\n"
+        
+        for i, bot_id in enumerate(self._bot_execution_queue):
+            bot = self.bots.get(bot_id)
+            if not bot:
+                continue
+                
+            # Xác định trạng thái
+            if bot_id == self._current_executing_bot:
+                status += f"🏃‍♂️ **{i+1}. {bot_id}** - 🟢 ĐANG THỰC THI\n"
+            elif len(bot.active_symbols) > 0:
+                status += f"⏳ {i+1}. {bot_id} - 🟡 ĐANG CÓ COIN\n"
+            else:
+                status += f"⌛ {i+1}. {bot_id} - 🔵 CHỜ ĐẾN LƯỢT\n"
+            
+            # Thêm thông tin chi tiết
+            if hasattr(bot, 'last_execution_time'):
+                wait_time = time.time() - bot.last_execution_time
+                status += f"   ⏰ Thời gian chờ: {wait_time:.1f}s\n"
+            
+            status += "\n"
+        
+        status += f"🔄 **Tổng số bot trong hàng đợi**: {len(self._bot_execution_queue)}\n"
+        status += f"⏱️ **Cooldown giữa các bot**: {self.bot_execution_cooldown}s\n\n"
+        
+        return status
 
     def log(self, message):
         """Chỉ log các thông tin quan trọng"""
@@ -1920,11 +1987,11 @@ class BotManager:
 
     def send_main_menu(self, chat_id):
         welcome = (
-            "🤖 <b>BOT GIAO DỊCH FUTURES - CƠ CHẾ NỐI TIẾP</b>\n\n"
-            "🎯 <b>MÔ HÌNH MỚI - TUẦN TỰ HOÀN TOÀN:</b>\n"
+            "🤖 <b>BOT GIAO DỊCH FUTURES - CƠ CHẾ NỐI TIẾP THỰC SỰ</b>\n\n"
+            "🎯 <b>MÔ HÌNH MỚI - HÀNG ĐỢI TUẦN TỰ:</b>\n"
             "• Mỗi bot chỉ quản lý 1 coin duy nhất\n"
-            "• Các bot vào lệnh nối tiếp nhau\n"
-            "• Tự động điều phối thứ tự thực thi\n"
+            "• Các bot thực thi theo hàng đợi cố định\n"
+            "• Chỉ 1 bot được thực thi tại thời điểm\n"
             f"• Chờ {self.bot_execution_cooldown}s giữa các bot\n\n"
             
             "📈 <b>ĐIỀU KIỆN VÀO LỆNH RSI NÂNG CAO:</b>\n"
@@ -1941,9 +2008,9 @@ class BotManager:
             "• VÀ phải đạt ROI trigger do người dùng thiết lập\n\n"
             
             "🔄 <b>CƠ CHẾ ĐIỀU PHỐI NỐI TIẾP:</b>\n"
-            "• Bot Manager điều phối thứ tự thực thi\n"
-            "• Chỉ 1 bot được tìm coin tại 1 thời điểm\n"
-            "• Tự động cân bằng tải giữa các bot\n"
+            "• Hàng đợi tuần tự cố định\n"
+            "• Bot thực thi xong được chuyển xuống cuối hàng đợi\n"
+            "• Đảm bảo công bằng cho tất cả bot\n"
             f"• Chờ {self.bot_execution_cooldown}s giữa các lệnh"
         )
         send_telegram(welcome, chat_id=chat_id, reply_markup=create_main_menu(),
@@ -1993,10 +2060,10 @@ class BotManager:
                 self.bots[bot_id] = bot
                 created_count += 1
                 
-                # Thêm bot vào danh sách thực thi
-                with self.bot_execution_lock:
-                    if bot_id not in self.bot_execution_order:
-                        self.bot_execution_order.append(bot_id)
+                # 🔴 THÊM BOT MỚI VÀO CUỐI HÀNG ĐỢI
+                with self._queue_lock:
+                    if bot_id not in self._bot_execution_queue:
+                        self._bot_execution_queue.append(bot_id)
                 
         except Exception as e:
             self.log(f"❌ Lỗi tạo bot: {str(e)}")
@@ -2022,18 +2089,13 @@ class BotManager:
                 success_msg += f"🔗 Coin: Tự động tìm kiếm\n"
             
             success_msg += f"\n🔄 <b>CƠ CHẾ NỐI TIẾP ĐÃ KÍCH HOẠT</b>\n"
-            success_msg += f"• Mỗi bot quản lý 1 coin duy nhất\n"
-            success_msg += f"• Các bot vào lệnh nối tiếp nhau\n"
-            success_msg += f"• Chờ {self.bot_execution_cooldown}s giữa các bot\n"
-            success_msg += f"• Tự động điều phối thứ tự thực thi\n\n"
-            success_msg += f"🎯 <b>ĐIỀU KIỆN RSI NÂNG CAO ĐÃ KÍCH HOẠT</b>\n"
-            success_msg += f"• 6 điều kiện RSI + giá + volume\n"
+            success_msg += f"• Hàng đợi tuần tự: {len(self._bot_execution_queue)} bot\n"
+            success_msg += f"• Thời gian chờ: {self.bot_execution_cooldown}s giữa các bot\n"
+            success_msg += f"• Bot mới được thêm vào cuối hàng đợi\n\n"
+            success_msg += f"🎯 <b>6 ĐIỀU KIỆN RSI ĐÃ KÍCH HOẠT</b>\n"
             success_msg += f"• Tín hiệu vào lệnh: 20% volume thay đổi\n"
-            success_msg += f"• Tín hiệu đóng lệnh: 40% volume thay đổi + ROI trigger\n\n"
-            success_msg += f"🚫 <b>KIỂM TRA VỊ THẾ ĐÃ KÍCH HOẠT</b>\n"
-            success_msg += f"• Tự động phát hiện coin có vị thế\n"
-            success_msg += f"• Không vào lệnh trên coin đã có vị thế\n"
-            success_msg += f"• Tự động chuyển sang tìm coin khác"
+            success_msg += f"• Tín hiệu đóng lệnh: 40% volume thay đổi + ROI trigger\n"
+            success_msg += f"• Tự động kiểm tra vị thế trước khi vào lệnh"
             
             self.log(success_msg)
             return True
@@ -2121,11 +2183,21 @@ class BotManager:
         return total_stopped
 
     def stop_bot(self, bot_id):
-        """Dừng toàn bộ bot (đóng tất cả vị thế và xóa bot)"""
+        """Dừng toàn bộ bot và xóa khỏi hàng đợi"""
         bot = self.bots.get(bot_id)
         if bot:
             bot.stop()
             del self.bots[bot_id]
+            
+            # 🔴 XÓA BOT KHỎI HÀNG ĐỢI
+            with self._queue_lock:
+                if bot_id in self._bot_execution_queue:
+                    self._bot_execution_queue.remove(bot_id)
+            
+            # 🔴 NẾU ĐANG LÀ BOT THỰC THI, RESET
+            if self._current_executing_bot == bot_id:
+                self._current_executing_bot = None
+                
             self.log(f"🔴 Đã dừng bot {bot_id}")
             return True
         return False
@@ -2456,6 +2528,12 @@ class BotManager:
             self.stop_all()
             send_telegram(f"✅ Đã dừng {stopped_count} bot, hệ thống vẫn chạy", chat_id=chat_id,
                          bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
+        
+        # XỬ LÝ LỆNH XEM HÀNG ĐỢI
+        elif text == "📋 Hàng đợi Bot":
+            queue_status = self.get_execution_queue_status()
+            send_telegram(queue_status, chat_id=chat_id,
+                         bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
     
         elif text == "➕ Thêm Bot":
             self.user_states[chat_id] = {'step': 'waiting_bot_count'}
@@ -2574,10 +2652,10 @@ class BotManager:
                 "• VÀ phải đạt ROI trigger do người dùng thiết lập\n"
                 "• Chỉ chốt lời, không vào lệnh ngược\n\n"
                 
-                "🔄 <b>CƠ CHẾ ĐIỀU PHỐI NỐI TIẾP:</b>\n"
-                "• Mỗi bot chỉ quản lý 1 coin duy nhất\n"
-                "• Các bot vào lệnh nối tiếp nhau\n"
-                "• Tự động điều phối thứ tự thực thi\n"
+                "🔄 <b>CƠ CHẾ ĐIỀU PHỐI NỐI TIẾP THỰC SỰ:</b>\n"
+                "• Hàng đợi tuần tự cố định\n"
+                "• Chỉ 1 bot được thực thi tại thời điểm\n"
+                "• Bot thực thi xong được chuyển xuống cuối hàng đợi\n"
                 f"• Chờ {self.bot_execution_cooldown}s giữa các bot\n\n"
                 
                 "🚫 <b>KIỂM TRA VỊ THẾ:</b>\n"
@@ -2610,8 +2688,9 @@ class BotManager:
                 f"📊 Bot có coin: {total_bots_with_coins}\n"
                 f"🟢 Bot đang trade: {trading_bots}\n"
                 f"🌐 WebSocket: {len(self.ws_manager.connections)} kết nối\n"
-                f"🔄 Cooldown: {self.bot_execution_cooldown}s\n\n"
-                f"🔄 <b>CƠ CHẾ NỐI TIẾP ĐANG HOẠT ĐỘNG</b>\n"
+                f"🔄 Cooldown: {self.bot_execution_cooldown}s\n"
+                f"📋 Hàng đợi: {len(self._bot_execution_queue)} bot\n\n"
+                f"🔄 <b>CƠ CHẾ NỐI TIẾP THỰC SỰ ĐANG HOẠT ĐỘNG</b>\n"
                 f"🎯 <b>6 ĐIỀU KIỆN RSI ĐANG HOẠT ĐỘNG</b>"
             )
             send_telegram(config_info, chat_id=chat_id,
@@ -2662,10 +2741,9 @@ class BotManager:
                     success_msg += f"\n🔗 Coin: {symbol}"
                 
                 success_msg += f"\n\n🔄 <b>CƠ CHẾ NỐI TIẾP ĐÃ KÍCH HOẠT</b>\n"
-                success_msg += f"• Mỗi bot quản lý 1 coin duy nhất\n"
-                success_msg += f"• Các bot vào lệnh nối tiếp nhau\n"
-                success_msg += f"• Chờ {self.bot_execution_cooldown}s giữa các bot\n"
-                success_msg += f"• Tự động điều phối thứ tự thực thi\n\n"
+                success_msg += f"• Hàng đợi tuần tự: {len(self._bot_execution_queue)} bot\n"
+                success_msg += f"• Thời gian chờ: {self.bot_execution_cooldown}s giữa các bot\n"
+                success_msg += f"• Bot mới được thêm vào cuối hàng đợi\n\n"
                 success_msg += f"🎯 <b>6 ĐIỀU KIỆN RSI ĐÃ KÍCH HOẠT</b>\n"
                 success_msg += f"• Tín hiệu vào lệnh: 20% volume thay đổi\n"
                 success_msg += f"• Tín hiệu đóng lệnh: 40% volume thay đổi + ROI trigger\n"
