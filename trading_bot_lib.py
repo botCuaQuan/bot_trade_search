@@ -59,7 +59,7 @@ def escape_html(text):
                 .replace('"', '&quot;'))
 
 def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, default_chat_id=None):
-    """Gửi tin nhắn Telegram - ĐÃ SỬA LỖI 404"""
+    """Gửi tin nhắn Telegram - ĐÃ SỬA LỖI TOKEN"""
     if not bot_token:
         logger.warning("Telegram Bot Token chưa được thiết lập")
         return False
@@ -69,14 +69,31 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
         logger.warning("Telegram Chat ID chưa được thiết lập")
         return False
     
-    # KIỂM TRA ĐỊNH DẠNG BOT TOKEN VÀ CHAT ID
-    if not bot_token.startswith('bot'):
-        # Đảm bảo token có định dạng đúng
-        if ':' in bot_token:
-            bot_token = f"bot{bot_token}"
-        else:
-            logger.error(f"❌ Bot Token không hợp lệ: {bot_token[:20]}...")
-            return False
+    # 🔴 SỬA QUAN TRỌNG: KHÔNG THÊM 'bot' VÀO ĐẦU TOKEN
+    original_token = bot_token
+    
+    # Chuẩn hóa token - loại bỏ khoảng trắng
+    bot_token = bot_token.strip()
+    
+    # Kiểm tra định dạng token
+    if ':' not in bot_token:
+        logger.error(f"❌ Bot Token không hợp lệ: {bot_token[:10]}...")
+        logger.error("   📝 Token phải có định dạng: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz")
+        return False
+    
+    # Tách token để kiểm tra
+    parts = bot_token.split(':')
+    if len(parts) != 2:
+        logger.error(f"❌ Bot Token không đúng định dạng: {bot_token[:10]}...")
+        return False
+    
+    bot_id, token_key = parts
+    if not bot_id.isdigit() or len(token_key) < 10:
+        logger.error(f"❌ Bot Token không hợp lệ: {bot_token[:10]}...")
+        return False
+    
+    # 🔴 QUAN TRỌNG: KHÔNG THÊM 'bot' VÀO ĐẦU TOKEN
+    # Telegram API yêu cầu token ở dạng gốc, không có 'bot' prefix
     
     # KIỂM TRA CHAT ID CÓ PHẢI LÀ SỐ NGUYÊN
     try:
@@ -85,7 +102,8 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
         logger.error(f"❌ Chat ID không hợp lệ: {chat_id}")
         return False
     
-    url = f"https://api.telegram.org/{bot_token}/sendMessage"
+    # 🔴 SỬA URL: Sử dụng token gốc, không thêm 'bot'
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     
     # ESCAPE MESSAGE ĐỂ TRÁNH LỖI HTML
     safe_message = escape_html(message)
@@ -97,13 +115,15 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
     }
     
     if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
+        payload["reply_markup"] = reply_markup
     
     try:
         headers = {
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
+        
+        logger.info(f"🔗 Đang gửi Telegram đến {chat_id_int}...")
         
         response = requests.post(
             url, 
@@ -113,25 +133,16 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
         )
         
         if response.status_code == 200:
+            logger.info("✅ Đã gửi Telegram thành công")
             return True
         else:
             error_data = response.json()
             error_description = error_data.get('description', 'Unknown error')
             
             if response.status_code == 404:
-                logger.error(f"❌ Lỗi Telegram 404 - Không tìm thấy: {error_description}")
-                logger.error(f"   Token: {bot_token[:20]}...***")
+                logger.error(f"❌ Lỗi Telegram 404: {error_description}")
+                logger.error(f"   Token: {bot_token[:15]}...")
                 logger.error(f"   Chat ID: {chat_id_int}")
-                logger.error("   Nguyên nhân có thể:")
-                logger.error("   - Bot Token sai")
-                logger.error("   - Chat ID sai") 
-                logger.error("   - Bot chưa được khởi tạo (gửi /start tới bot trước)")
-            elif response.status_code == 400:
-                logger.error(f"❌ Lỗi Telegram 400 - Bad Request: {error_description}")
-            elif response.status_code == 401:
-                logger.error(f"❌ Lỗi Telegram 401 - Unauthorized: Token không hợp lệ")
-            elif response.status_code == 403:
-                logger.error(f"❌ Lỗi Telegram 403 - Forbidden: Bot bị chặn bởi user")
             else:
                 logger.error(f"❌ Lỗi Telegram ({response.status_code}): {error_description}")
             
@@ -146,7 +157,35 @@ def send_telegram(message, chat_id=None, reply_markup=None, bot_token=None, defa
     except Exception as e:
         logger.error(f"❌ Lỗi không xác định khi gửi Telegram: {str(e)}")
         return False
-
+def validate_telegram_config(bot_token, chat_id):
+    """Kiểm tra và chuẩn hóa cấu hình Telegram"""
+    if not bot_token or not chat_id:
+        return None, None, "❌ Thiếu Bot Token hoặc Chat ID"
+    
+    # Chuẩn hóa token
+    bot_token = bot_token.strip()
+    
+    # Kiểm tra định dạng token
+    if ':' not in bot_token:
+        return None, None, f"❌ Token không hợp lệ. Định dạng phải là: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz"
+    
+    parts = bot_token.split(':')
+    if len(parts) != 2:
+        return None, None, "❌ Token không đúng định dạng"
+    
+    bot_id, token_key = parts
+    if not bot_id.isdigit() or len(token_key) < 10:
+        return None, None, "❌ Token không hợp lệ: phần đầu phải là số, phần sau ít nhất 10 ký tự"
+    
+    # 🔴 QUAN TRỌNG: GIỮ NGUYÊN TOKEN, KHÔNG THÊM 'bot'
+    
+    # Chuẩn hóa chat_id
+    try:
+        chat_id = str(int(chat_id))
+    except (ValueError, TypeError):
+        return None, None, "❌ Chat ID phải là số nguyên"
+    
+    return bot_token, chat_id, "✅ Cấu hình Telegram hợp lệ"
 # ========== MENU TELEGRAM HOÀN CHỈNH ==========
 def create_cancel_keyboard():
     return {
@@ -1736,65 +1775,86 @@ class BotManager:
         self.api_key = api_key
         self.api_secret = api_secret
         
-        # 🔴 SỬA LỖI: XỬ LÝ TELEGRAM TOKEN VÀ CHAT ID
-        self.telegram_bot_token = telegram_bot_token
-        self.telegram_chat_id = telegram_chat_id
+        # 🔴 SỬA QUAN TRỌNG: KIỂM TRA VÀ CHUẨN HÓA TELEGRAM CONFIG
+        self.telegram_bot_token = None
+        self.telegram_chat_id = None
+        self.telegram_enabled = False
         
-        # KIỂM TRA VÀ CHUẨN HÓA TELEGRAM CONFIG
-        if self.telegram_bot_token:
-            if not self.telegram_bot_token.startswith('bot'):
-                if ':' in self.telegram_bot_token:
-                    self.telegram_bot_token = f"bot{self.telegram_bot_token}"
+        if telegram_bot_token and telegram_chat_id:
+            # 🔴 SỬA: IN RA ĐỂ DEBUG
+            logger.info(f"🔧 Nhận Telegram config:")
+            logger.info(f"   Token: {telegram_bot_token[:15]}...")
+            logger.info(f"   Chat ID: {telegram_chat_id}")
+            
+            validated_token, validated_chat_id, message = validate_telegram_config(
+                telegram_bot_token, telegram_chat_id
+            )
+            
+            if validated_token and validated_chat_id:
+                self.telegram_bot_token = validated_token
+                self.telegram_chat_id = validated_chat_id
+                self.telegram_enabled = True
+                logger.info(f"🟢 {message}")
+                
+                # Test kết nối Telegram
+                test_msg = "🤖 <b>KIỂM TRA KẾT NỐI TELEGRAM</b>\n\n" \
+                          "✅ Cấu hình Telegram: Hợp lệ\n" \
+                          "🔄 Đang kiểm tra kết nối..."
+                
+                if send_telegram(test_msg, 
+                               bot_token=self.telegram_bot_token, 
+                               default_chat_id=self.telegram_chat_id):
+                    logger.info("🔔 Telegram: Kết nối thành công!")
                 else:
-                    logger.error("❌ Bot Token không hợp lệ, tính năng Telegram sẽ bị vô hiệu hóa")
-                    self.telegram_bot_token = None
-                    self.telegram_chat_id = None
-        
-        if self.telegram_chat_id:
-            try:
-                # Đảm bảo chat_id là số nguyên
-                self.telegram_chat_id = str(int(self.telegram_chat_id))
-            except (ValueError, TypeError):
-                logger.error("❌ Chat ID không hợp lệ, tính năng Telegram sẽ bị vô hiệu hóa")
-                self.telegram_chat_id = None
-                if self.telegram_bot_token:
-                    self.telegram_bot_token = None
+                    logger.warning("⚠️ Telegram: Có vấn đề với kết nối")
+            else:
+                logger.error(f"🔴 {message}")
+        else:
+            logger.warning("🟡 Cảnh báo: Chưa cấu hình Telegram. Bot sẽ chạy không có thông báo.")
 
-        # ✅ tài nguyên dùng chung cho tất cả bot
+        # Các phần còn lại giữ nguyên...
         self.coin_manager = CoinManager()
         self.symbol_locks = defaultdict(threading.Lock)
-
-        # 🔴 THÊM: Biến quản lý thứ tự vào lệnh của các bot
         self.bot_execution_order = []
         self.bot_execution_lock = threading.Lock()
         self.last_bot_execution_time = 0
-        self.bot_execution_cooldown = 3  # 3s giữa các bot
+        self.bot_execution_cooldown = 3
 
         if api_key and api_secret:
             self._verify_api_connection()
             
-            # KIỂM TRA TELEGRAM CONNECTION
-            if self.telegram_bot_token and self.telegram_chat_id:
-                test_message = "🤖 <b>BOT ĐÃ KHỞI ĐỘNG THÀNH CÔNG</b>\n\n" \
-                              "✅ Kết nối Binance: Thành công\n" \
-                              "✅ Kết nối Telegram: Đang kiểm tra..."
+            if self.telegram_enabled:
+                self.telegram_thread = threading.Thread(target=self._telegram_listener, daemon=True)
+                self.telegram_thread.start()
                 
-                if send_telegram(test_message, 
-                               bot_token=self.telegram_bot_token, 
-                               default_chat_id=self.telegram_chat_id):
-                    logger.info("🟢 HỆ THỐNG BOT RSI + KHỐI LƯỢNG ĐÃ KHỞI ĐỘNG - TELEGRAM HOẠT ĐỘNG")
-                else:
-                    logger.warning("🟡 HỆ THỐNG KHỞI ĐỘNG - TELEGRAM CÓ VẤN ĐỀ")
-            else:
-                logger.info("🟢 HỆ THỐNG BOT RSI + KHỐI LƯỢNG ĐÃ KHỞI ĐỘNG - KHÔNG CÓ TELEGRAM")
-
-            self.telegram_thread = threading.Thread(target=self._telegram_listener, daemon=True)
-            self.telegram_thread.start()
-
-            if self.telegram_chat_id:
+                # Gửi thông báo khởi động thành công
+                success_msg = (
+                    "🎉 <b>BOT ĐÃ KHỞI ĐỘNG THÀNH CÔNG</b>\n\n"
+                    "✅ Kết nối Binance: Hoạt động\n"
+                    "✅ Kết nối Telegram: Hoạt động\n"
+                    "🤖 Sẵn sàng giao dịch!"
+                )
+                self.send_telegram_message(success_msg)
+                
+                # Gửi menu chính
                 self.send_main_menu(self.telegram_chat_id)
+            else:
+                logger.info("🟢 HỆ THỐNG BOT ĐÃ KHỞI ĐỘNG (không có Telegram)")
         else:
             logger.info("⚡ BotManager khởi động ở chế độ không config")
+
+    def send_telegram_message(self, message, chat_id=None, reply_markup=None):
+        """Gửi tin nhắn Telegram an toàn"""
+        if not self.telegram_enabled:
+            return False
+            
+        return send_telegram(
+            message, 
+            chat_id=chat_id,
+            reply_markup=reply_markup,
+            bot_token=self.telegram_bot_token, 
+            default_chat_id=self.telegram_chat_id
+        )
 
     def _execute_bots_sequentially(self):
         """Điều phối các bot thực hiện TUẦN TỰ"""
