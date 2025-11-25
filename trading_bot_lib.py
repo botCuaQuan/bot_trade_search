@@ -24,7 +24,14 @@ import ssl
 _BINANCE_LAST_REQUEST_TIME = 0
 _BINANCE_RATE_LOCK = threading.Lock()
 # Khoảng cách tối thiểu giữa 2 request: 0.25s ~ 4 request/giây cho toàn bộ bot
-_BINANCE_MIN_INTERVAL = 0.25  
+_BINANCE_MIN_INTERVAL = 0.25
+# ========== CACHE DANH SÁCH COIN USDC ==========
+_USDC_CACHE = {
+    "pairs": [],
+    "last_update": 0
+}
+_USDC_CACHE_TTL = 300  # 300 giây = 5 phút
+
 
 def _wait_for_rate_limit():
     """Đảm bảo không spam quá nhiều request/giây (toàn cục)."""
