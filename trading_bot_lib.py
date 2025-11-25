@@ -995,28 +995,34 @@ class BaseBot:
                 if (current_time - symbol_info['last_trade_time'] > 60 and 
                     current_time - symbol_info['last_close_time'] > 3600):
                     
-                    target_side = self.get_next_side_based_on_comprehensive_analysis()
-                    
-                    # 🔴 SỬ DỤNG TÍN HIỆU VÀO LỆNH MỚI (20% khối lượng)
+                    # 🔴 SỬA: KIỂM TRA TÍN HIỆU COIN TRƯỚC, SAU ĐÓ SO VỚI HƯỚNG TỔNG THỂ
                     entry_signal = self.coin_finder.get_entry_signal(symbol)
                     
-                    if entry_signal == target_side:
-                        # 🔴 KIỂM TRA CUỐI CÙNG TRƯỚC KHI VÀO LỆNH
-                        if self.coin_finder.has_existing_position(symbol):
-                            self.log(f"🚫 {symbol} - ĐÃ CÓ VỊ THẾ TRÊN BINANCE, BỎ QUA VÀ TÌM COIN KHÁC")
-                            self.stop_symbol(symbol)
-                            return False
+                    if entry_signal:  # Nếu coin có tín hiệu
+                        # Kiểm tra hướng tổng thể
+                        target_side = self.get_next_side_based_on_comprehensive_analysis()
                         
-                        if self._open_symbol_position(symbol, target_side):
-                            symbol_info['last_trade_time'] = current_time
-                            return True
-            
+                        # Chỉ vào lệnh nếu tín hiệu coin TRÙNG với hướng tổng thể
+                        if entry_signal == target_side:
+                            # 🔴 KIỂM TRA CUỐI CÙNG TRƯỚC KHI VÀO LỆNH
+                            if self.coin_finder.has_existing_position(symbol):
+                                self.log(f"🚫 {symbol} - ĐÃ CÓ VỊ THẾ TRÊN BINANCE, BỎ QUA VÀ TÌM COIN KHÁC")
+                                self.stop_symbol(symbol)
+                                return False
+                            
+                            if self._open_symbol_position(symbol, target_side):
+                                symbol_info['last_trade_time'] = current_time
+                                return True
+                        else:
+                            self.log(f"🔄 {symbol} - Tín hiệu {entry_signal} không trùng với hướng tổng thể {target_side}, bỏ qua")
+                            # Có thể thêm logic để đánh dấu coin này tạm thời không xét lại
+                            symbol_info['last_trade_time'] = current_time - 30  # Giảm thời gian chờ để kiểm tra lại sớm hơn
+                
             return False
             
         except Exception as e:
             self.log(f"❌ Lỗi xử lý {symbol}: {str(e)}")
             return False
-
     def _check_smart_exit_condition(self, symbol):
         """Kiểm tra điều kiện đóng lệnh thông minh - GIỐNG HỆT ĐIỀU KIỆN VÀO LỆNH"""
         try:
@@ -1063,10 +1069,10 @@ class BaseBot:
         """Tìm và thêm coin mới vào quản lý - MỖI COIN ĐỘC LẬP"""
         try:
             active_coins = self.coin_manager.get_active_coins()
-            target_direction = self.get_next_side_based_on_comprehensive_analysis()
             
-            new_symbol = self.coin_finder.find_best_coin(
-                target_direction=target_direction,
+            # 🔴 SỬA: KHÔNG ÉP HƯỚNG TỔNG THỂ NGAY TỪ ĐẦU
+            # Thay vào đó, tìm coin có tín hiệu bất kỳ, sau đó kiểm tra trùng với hướng tổng thể
+            new_symbol = self.coin_finder.find_best_coin_any_signal(
                 excluded_coins=active_coins,
                 required_leverage=self.lev
             )
@@ -1095,6 +1101,56 @@ class BaseBot:
             self.log(f"❌ Lỗi tìm coin mới: {str(e)}")
             return False
 
+    def find_best_coin_any_signal(self, excluded_coins=None, required_leverage=10):
+    """Tìm coin tốt nhất với bất kỳ tín hiệu nào - không ép hướng cụ thể"""
+    try:
+        all_symbols = get_all_usdc_pairs(limit=50)
+        if not all_symbols:
+            return None
+        
+        valid_symbols = []
+        
+        for symbol in all_symbols:
+            # Kiểm tra coin đã bị loại trừ
+            if excluded_coins and symbol in excluded_coins:
+                continue
+            
+            # 🔴 QUAN TRỌNG: Kiểm tra coin đã có vị thế trên Binance
+            if self.has_existing_position(symbol):
+                logger.info(f"🚫 Bỏ qua {symbol} - đã có vị thế trên Binance")
+                continue
+            
+            # Kiểm tra đòn bẩy
+            max_lev = self.get_symbol_leverage(symbol)
+            if max_lev < required_leverage:
+                continue
+            
+            # 🔴 TÌM COIN CÓ TÍN HIỆU BẤT KỲ (BUY hoặc SELL)
+            entry_signal = self.get_entry_signal(symbol)
+            if entry_signal in ["BUY", "SELL"]:
+                valid_symbols.append((symbol, entry_signal))
+                logger.info(f"✅ Tìm thấy coin có tín hiệu: {symbol} - Tín hiệu: {entry_signal}")
+        
+        if not valid_symbols:
+            logger.info("❌ Không tìm thấy coin nào có tín hiệu")
+            return None
+        
+        # Chọn ngẫu nhiên từ danh sách hợp lệ
+        selected_symbol, signal = random.choice(valid_symbols)
+        max_lev = self.get_symbol_leverage(selected_symbol)
+        
+        # 🔴 KIỂM TRA LẦN CUỐI: Đảm bảo coin được chọn không có vị thế
+        if self.has_existing_position(selected_symbol):
+            logger.info(f"🚫 {selected_symbol} - Coin được chọn đã có vị thế, bỏ qua")
+            return None
+        
+        logger.info(f"✅ Đã chọn coin: {selected_symbol} - Tín hiệu: {signal} - Đòn bẩy: {max_lev}x")
+        return selected_symbol
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi tìm coin: {str(e)}")
+        return None
+        
     def _add_symbol(self, symbol):
         """Thêm một symbol vào quản lý của bot - KIỂM TRA VỊ THẾ KHI THÊM"""
         if symbol in self.active_symbols:
