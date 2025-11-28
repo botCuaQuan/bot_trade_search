@@ -976,11 +976,6 @@ class WebSocketManager:
         for symbol in list(self.connections.keys()):
             self.remove_symbol(symbol)
 
-# Tiếp tục với phần 2...
-
-# trading_bot_lib_part2.py
-from trading_bot_lib_part1 import *
-
 # ========== BASE BOT VỚI MULTI-THREAD ==========
 class BaseBot:
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager, api_key, api_secret,
