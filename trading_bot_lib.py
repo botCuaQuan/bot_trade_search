@@ -453,11 +453,15 @@ class BotExecutionCoordinator:
     
     def request_coin_search(self, bot_id):
         with self._lock:
-            if bot_id in self._bots_with_coins: return False
-            if self._current_finding_bot is None:
+            if bot_id in self._bots_with_coins:
+                return False
+                
+            # ✅ SỬA: Cho phép bot đang được chỉ định (_current_finding_bot) được quyền scan
+            if self._current_finding_bot is None or self._current_finding_bot == bot_id:
                 self._current_finding_bot = bot_id
                 return True
             else:
+                # Chỉ xếp hàng nếu chưa ở trong queue
                 if bot_id not in list(self._bot_queue.queue):
                     self._bot_queue.put(bot_id)
                 return False
@@ -790,36 +794,50 @@ class BaseBot:
         self.log(f"🟢 Bot {strategy_name} started | 1 coin | Leverage: {lev}x | Capital: {percent}% | TP/SL: {tp}%/{sl}%{roi_info}")
 
     def _run(self):
+        """Vòng lặp chính - ĐÃ SỬA LOGIC TRẢ VỀ TÊN COIN"""
         while not self._stop:
             try:
                 current_time = time.time()
                 
+                # KIỂM TRA VỊ THẾ TOÀN TÀI KHOẢN ĐỊNH KỲ
                 if current_time - self.last_global_position_check > 30:
                     self.check_global_positions()
                     self.last_global_position_check = current_time
                 
+                # NẾU BOT KHÔNG CÓ COIN NÀO - YÊU CẦU TÌM COIN
                 if not self.active_symbols:
                     search_permission = self.bot_coordinator.request_coin_search(self.bot_id)
                     
                     if search_permission:
+                        # Bot này được quyền tìm coin (đứng đầu queue)
                         queue_info = self.bot_coordinator.get_queue_info()
-                        self.log(f"🔍 Finding coin (position: 1/{queue_info['queue_size'] + 1})...")
-                        found_coin = self._find_and_add_new_coin()
+                        self.log(f"🔍 Đang tìm coin (vị trí: 1/{queue_info['queue_size'] + 1})...")
+                        found_coin = self._find_and_add_new_coin()  # 🎯 GIỜ TRẢ VỀ TÊN COIN HOẶC NONE
                         
-                        if found_coin:
-                            self.bot_coordinator.finish_coin_search(self.bot_id, found_coin, has_coin_now=True)
-                            self.log(f"✅ Found and added coin: {found_coin}")
-                            next_bot = self.bot_coordinator.get_queue_info()['current_finding']
-                            if next_bot: self.log(f"🔄 Passed coin finding to bot: {next_bot}")
+                        if found_coin:  # ✅ NẾU TÌM THẤY COIN (TÊN COIN)
+                            # Tìm thành công - đánh dấu bot đã có coin và giải phóng quyền tìm
+                            next_bot = self.bot_coordinator.finish_coin_search(
+                                self.bot_id, 
+                                found_symbol=found_coin,  # 🎯 TRUYỀN ĐÚNG TÊN COIN
+                                has_coin_now=True
+                            )
+                            self.log(f"✅ Đã tìm thấy và thêm coin: {found_coin}")
+                            
+                            # Bot tiếp theo trong queue sẽ được thông báo tự động
+                            if next_bot:
+                                self.log(f"🔄 Đã chuyển quyền tìm coin cho bot: {next_bot}")
                         else:
+                            # Tìm thất bại - vẫn chưa có coin, giải phóng quyền tìm
                             self.bot_coordinator.finish_coin_search(self.bot_id)
-                            self.log(f"❌ No suitable coin found")
+                            self.log(f"❌ Không tìm thấy coin phù hợp")
                     else:
+                        # Chờ trong queue
                         queue_pos = self.bot_coordinator.get_queue_position(self.bot_id)
                         if queue_pos > 0:
                             queue_info = self.bot_coordinator.get_queue_info()
-                            self.log(f"⏳ Waiting for coin search (position: {queue_pos}/{queue_info['queue_size'] + 1})...")
+                            self.log(f"⏳ Đang chờ tìm coin (vị trí: {queue_pos}/{queue_info['queue_size'] + 1})...")
                 
+                # XỬ LÝ COIN HIỆN TẠI (nếu có)
                 for symbol in self.active_symbols.copy():
                     self._process_single_symbol(symbol)
                 
@@ -827,7 +845,7 @@ class BaseBot:
                 
             except Exception as e:
                 if time.time() - self.last_error_log_time > 10:
-                    self.log(f"❌ System error: {str(e)}")
+                    self.log(f"❌ Lỗi hệ thống: {str(e)}")
                     self.last_error_log_time = time.time()
                 time.sleep(5)
 
@@ -891,26 +909,35 @@ class BaseBot:
             return False
 
     def _find_and_add_new_coin(self):
+        """Tìm và thêm coin mới - TRẢ VỀ TÊN COIN HOẶC NONE"""
         try:
             active_coins = self.coin_manager.get_active_coins()
+            
             new_symbol = self.coin_finder.find_best_coin_any_signal(
-                excluded_coins=active_coins, required_leverage=self.lev)
+                excluded_coins=active_coins,
+                required_leverage=self.lev
+            )
             
             if new_symbol and self.bot_coordinator.is_coin_available(new_symbol):
-                if self.coin_finder.has_existing_position(new_symbol): return False
+                if self.coin_finder.has_existing_position(new_symbol):
+                    return None  # ❌ Không thể thêm do có vị thế tồn tại
+                    
                 success = self._add_symbol(new_symbol)
                 if success:
+                    # Kiểm tra ngay lập tức
                     time.sleep(1)
                     if self.coin_finder.has_existing_position(new_symbol):
-                        self.log(f"🚫 {new_symbol} - POSITION DETECTED AFTER ADDING, STOPPING TRACKING")
+                        self.log(f"🚫 {new_symbol} - PHÁT HIỆN CÓ VỊ THẾ SAU KHI THÊM, DỪNG THEO DÕI NGAY")
                         self.stop_symbol(new_symbol)
-                        return False
-                    return True
-            return False
+                        return None  # ❌ Phát hiện vị thế sau khi thêm
+                        
+                    return new_symbol  # ✅ TRẢ VỀ TÊN COIN KHI THÀNH CÔNG
             
+            return None  # ❌ Không tìm thấy coin phù hợp
+                
         except Exception as e:
-            self.log(f"❌ New coin finding error: {str(e)}")
-            return False
+            self.log(f"❌ Lỗi tìm coin mới: {str(e)}")
+            return None
             
     def _add_symbol(self, symbol):
         if symbol in self.active_symbols or len(self.active_symbols) >= self.max_coins:
