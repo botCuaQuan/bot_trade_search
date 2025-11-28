@@ -495,6 +495,18 @@ class BotExecutionCoordinator:
     
     def is_coin_available(self, symbol):
         with self._lock: return symbol not in self._found_coins
+
+    def bot_processing_coin(self, bot_id):
+        """Đánh dấu bot đang xử lý coin (chưa vào lệnh)"""
+        with self._lock:
+            self._bots_with_coins.add(bot_id)
+            # Xóa bot khỏi queue nếu có
+            new_queue = queue.Queue()
+            while not self._bot_queue.empty():
+                bot_in_queue = self._bot_queue.get()
+                if bot_in_queue != bot_id:
+                    new_queue.put(bot_in_queue)
+            self._bot_queue = new_queue
     
     def get_queue_info(self):
         with self._lock:
@@ -794,7 +806,7 @@ class BaseBot:
         self.log(f"🟢 Bot {strategy_name} started | 1 coin | Leverage: {lev}x | Capital: {percent}% | TP/SL: {tp}%/{sl}%{roi_info}")
 
     def _run(self):
-        """Vòng lặp chính - ĐÃ SỬA LOGIC TRẢ VỀ TÊN COIN"""
+        """Vòng lặp chính - CHỈ CHUYỂN QUYỀN KHI ĐÃ VÀO LỆNH THÀNH CÔNG"""
         while not self._stop:
             try:
                 current_time = time.time()
@@ -809,25 +821,20 @@ class BaseBot:
                     search_permission = self.bot_coordinator.request_coin_search(self.bot_id)
                     
                     if search_permission:
-                        # Bot này được quyền tìm coin (đứng đầu queue)
+                        # Bot này được quyền tìm coin
                         queue_info = self.bot_coordinator.get_queue_info()
                         self.log(f"🔍 Đang tìm coin (vị trí: 1/{queue_info['queue_size'] + 1})...")
-                        found_coin = self._find_and_add_new_coin()  # 🎯 GIỜ TRẢ VỀ TÊN COIN HOẶC NONE
                         
-                        if found_coin:  # ✅ NẾU TÌM THẤY COIN (TÊN COIN)
-                            # Tìm thành công - đánh dấu bot đã có coin và giải phóng quyền tìm
-                            next_bot = self.bot_coordinator.finish_coin_search(
-                                self.bot_id, 
-                                found_symbol=found_coin,  # 🎯 TRUYỀN ĐÚNG TÊN COIN
-                                has_coin_now=True
-                            )
-                            self.log(f"✅ Đã tìm thấy và thêm coin: {found_coin}")
-                            
-                            # Bot tiếp theo trong queue sẽ được thông báo tự động
-                            if next_bot:
-                                self.log(f"🔄 Đã chuyển quyền tìm coin cho bot: {next_bot}")
+                        # TÌM COIN
+                        found_coin = self._find_and_add_new_coin()
+                        
+                        if found_coin:
+                            # 🎯 QUAN TRỌNG: CHỈ ĐÁNH DẤU LÀ ĐANG XỬ LÝ, CHƯA CHUYỂN QUYỀN
+                            self.bot_coordinator.bot_has_coin(self.bot_id)  # Đánh dấu bot đang xử lý coin
+                            self.log(f"✅ Đã tìm thấy coin: {found_coin}, đang chờ vào lệnh...")
+                            # 🚫 KHÔNG gọi finish_coin_search ở đây - chờ vào lệnh thành công
                         else:
-                            # Tìm thất bại - vẫn chưa có coin, giải phóng quyền tìm
+                            # Tìm thất bại - giải phóng quyền tìm ngay
                             self.bot_coordinator.finish_coin_search(self.bot_id)
                             self.log(f"❌ Không tìm thấy coin phù hợp")
                     else:
@@ -835,11 +842,21 @@ class BaseBot:
                         queue_pos = self.bot_coordinator.get_queue_position(self.bot_id)
                         if queue_pos > 0:
                             queue_info = self.bot_coordinator.get_queue_info()
-                            self.log(f"⏳ Đang chờ tìm coin (vị trí: {queue_pos}/{queue_info['queue_size'] + 1})...")
+                            current_finder = queue_info['current_finding']
+                            self.log(f"⏳ Đang chờ tìm coin (vị trí: {queue_pos}/{queue_info['queue_size'] + 1}) - Bot đang tìm: {current_finder}")
+                        time.sleep(2)
                 
-                # XỬ LÝ COIN HIỆN TẠI (nếu có)
+                # XỬ LÝ COIN HIỆN TẠI (nếu có) - QUAN TRỌNG: KIỂM TRA VÀO LỆNH THÀNH CÔNG
                 for symbol in self.active_symbols.copy():
-                    self._process_single_symbol(symbol)
+                    position_opened = self._process_single_symbol(symbol)
+                    
+                    # 🎯 NẾU VỪA VÀO LỆNH THÀNH CÔNG, CHUYỂN QUYỀN CHO BOT TIẾP THEO
+                    if position_opened:
+                        self.log(f"🎯 Đã vào lệnh thành công {symbol}, chuyển quyền tìm coin...")
+                        next_bot = self.bot_coordinator.finish_coin_search(self.bot_id)
+                        if next_bot:
+                            self.log(f"🔄 Đã chuyển quyền tìm coin cho bot: {next_bot}")
+                        break  # Chỉ xử lý một coin một lúc
                 
                 time.sleep(1)
                 
@@ -848,34 +865,45 @@ class BaseBot:
                     self.log(f"❌ Lỗi hệ thống: {str(e)}")
                     self.last_error_log_time = time.time()
                 time.sleep(5)
-
     def _process_single_symbol(self, symbol):
+        """Xử lý một symbol duy nhất - TRẢ VỀ True NẾU VỪA VÀO LỆNH THÀNH CÔNG"""
         try:
             symbol_info = self.symbol_data[symbol]
             current_time = time.time()
             
+            # Kiểm tra vị thế định kỳ
             if current_time - symbol_info.get('last_position_check', 0) > 30:
                 self._check_symbol_position(symbol)
                 symbol_info['last_position_check'] = current_time
             
+            # Xử lý theo trạng thái
             if symbol_info['position_open']:
-                if self._check_smart_exit_condition(symbol): return True
+                # Kiểm tra đóng lệnh
+                if self._check_smart_exit_condition(symbol):
+                    return False
+                
+                # Kiểm tra TP/SL truyền thống
                 self._check_symbol_tp_sl(symbol)
+                return False
             else:
+                # Tìm cơ hội vào lệnh
                 if (current_time - symbol_info['last_trade_time'] > 30 and 
                     current_time - symbol_info['last_close_time'] > 30):
                     
                     entry_signal = self.coin_finder.get_entry_signal(symbol)
+                    
                     if entry_signal:
                         target_side = self.get_next_side_based_on_comprehensive_analysis()
-                        if entry_signal == target_side and not self.coin_finder.has_existing_position(symbol):
-                            if self._open_symbol_position(symbol, target_side):
-                                symbol_info['last_trade_time'] = current_time
-                                return True
-            return False
-            
+                        
+                        if entry_signal == target_side:
+                            if not self.coin_finder.has_existing_position(symbol):
+                                if self._open_symbol_position(symbol, target_side):
+                                    symbol_info['last_trade_time'] = current_time
+                                    return True  # 🎯 TRẢ VỀ True KHI VÀO LỆNH THÀNH CÔNG
+                return False
+                
         except Exception as e:
-            self.log(f"❌ Processing error {symbol}: {str(e)}")
+            self.log(f"❌ Lỗi xử lý {symbol}: {str(e)}")
             return False
 
     def _check_smart_exit_condition(self, symbol):
