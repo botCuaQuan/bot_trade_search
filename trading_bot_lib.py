@@ -1119,7 +1119,7 @@ class BaseBot:
             else:
                 # Tìm cơ hội vào lệnh - CHỈ KHI ĐỦ THỜI GIAN CHỜ
                 if (current_time - symbol_info['last_trade_time'] > 60 and 
-                    current_time - symbol_info['last_close_time'] > 3600):
+                    current_time - symbol_info['last_close_time'] > 60):
                     
                     # 🔴 SỬA: KIỂM TRA TÍN HIỆU COIN TRƯỚC, SAU ĐÓ SO VỚI HƯỚNG TỔNG THỂ
                     entry_signal = self.coin_finder.get_entry_signal(symbol)
