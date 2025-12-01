@@ -782,6 +782,7 @@ class BaseBot:
         self.global_short_count = 0
         self.global_long_pnl = 0
         self.global_short_pnl = 0
+        self.next_global_side = None
 
         self.coin_manager = coin_manager or CoinManager()
         self.symbol_locks = symbol_locks
@@ -1270,46 +1271,76 @@ class BaseBot:
         self.log(f"🔴 Bot stopped - Stopped {stopped_count} coins")
 
     def check_global_positions(self):
+        """
+        Cập nhật số lượng lệnh LONG/SHORT toàn tài khoản
+        và quyết định luôn hướng ưu tiên (next_global_side) dựa trên COUNT.
+
+        CƠ CHẾ:
+        - Nếu số lệnh LONG > số lệnh SHORT  → ưu tiên SELL (cân bằng hai phía)
+        - Nếu số lệnh SHORT > số lệnh LONG → ưu tiên BUY
+        - Nếu bằng nhau                    → random BUY/SELL
+        """
         try:
             positions = get_positions(api_key=self.api_key, api_secret=self.api_secret)
+
+            # Không có vị thế nào
             if not positions:
                 self.global_long_count = 0
                 self.global_short_count = 0
+
+                # Không xài PnL nữa, set về 0 cho sạch
                 self.global_long_pnl = 0
                 self.global_short_pnl = 0
+
+                # Không có gì → chọn ngẫu nhiên
+                self.next_global_side = random.choice(["BUY", "SELL"])
                 return
             
             long_count, short_count = 0, 0
-            long_pnl_total, short_pnl_total = 0, 0
-            
+
+            # ĐẾM SỐ LỆNH LONG/SHORT, KHÔNG ĐỤNG TỚI PnL
             for pos in positions:
                 position_amt = float(pos.get('positionAmt', 0))
-                unrealized_pnl = float(pos.get('unRealizedProfit', 0))
-                
+
                 if position_amt > 0:
                     long_count += 1
-                    long_pnl_total += unrealized_pnl
                 elif position_amt < 0:
                     short_count += 1
-                    short_pnl_total += unrealized_pnl
             
             self.global_long_count = long_count
             self.global_short_count = short_count
-            self.global_long_pnl = long_pnl_total
-            self.global_short_pnl = short_pnl_total
-            
+
+            # PnL không dùng nữa
+            self.global_long_pnl = 0
+            self.global_short_pnl = 0
+
+            # --- LOGIC CHỌN HƯỚNG NẰM Ở ĐÂY ---
+            # ✅ CÂN BẰNG: đông LONG → ưu tiên SELL, đông SHORT → ưu tiên BUY
+            if long_count > short_count:
+                self.next_global_side = "SELL"
+            elif short_count > long_count:
+                self.next_global_side = "BUY"
+            else:
+                self.next_global_side = random.choice(["BUY", "SELL"])
+
         except Exception as e:
             if time.time() - self.last_error_log_time > 30:
                 self.log(f"❌ Global positions error: {str(e)}")
                 self.last_error_log_time = time.time()
 
+
     def get_next_side_based_on_comprehensive_analysis(self):
+        """
+        Lấy hướng ưu tiên toàn cục đã tính sẵn trong check_global_positions.
+        Không còn dùng PnL, chỉ dựa trên số lượng lệnh.
+        """
         self.check_global_positions()
-        long_pnl, short_pnl = self.global_long_pnl, self.global_short_pnl
-        
-        if long_pnl > short_pnl: return "BUY"
-        elif short_pnl > long_pnl: return "SELL"
-        else: return random.choice(["BUY", "SELL"])
+
+        if self.next_global_side in ["BUY", "SELL"]:
+            return self.next_global_side
+        else:
+            # Fallback phòng trường hợp lỗi, cho chắc
+            return random.choice(["BUY", "SELL"])
 
     def log(self, message):
         important_keywords = ['❌', '✅', '⛔', '💰', '📈', '📊', '🎯', '🛡️', '🔴', '🟢', '⚠️', '🚫']
