@@ -26,10 +26,10 @@ _BINANCE_RATE_LOCK = threading.Lock()
 _BINANCE_MIN_INTERVAL = 0.1
 
 _USDC_CACHE = {"pairs": [], "last_update": 0}
-_USDC_CACHE_TTL = 300
+_USDC_CACHE_TTL = 60
 
 _LEVERAGE_CACHE = {"data": {}, "last_update": 0}
-_LEVERAGE_CACHE_TTL = 300
+_LEVERAGE_CACHE_TTL = 60
 
 _SYMBOL_BLACKLIST = {'BTCUSDC', 'ETHUSDC'}
 
@@ -244,7 +244,7 @@ def binance_api_request(url, method='GET', params=None, headers=None):
     logger.error(f"Failed API request after {max_retries} attempts")
     return None
 
-def get_all_usdc_pairs(limit=100):
+def get_all_usdc_pairs(limit=50):
     global _USDC_CACHE
     try:
         now = time.time()
@@ -635,7 +635,7 @@ class SmartCoinFinder:
             if now - self.last_scan_time < self.scan_cooldown: return None
             self.last_scan_time = now
 
-            all_symbols = get_all_usdc_pairs(limit=20)
+            all_symbols = get_all_usdc_pairs(limit=50)
             if not all_symbols: return None
 
             valid_symbols = []
