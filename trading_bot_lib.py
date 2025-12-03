@@ -351,6 +351,43 @@ def get_balance(api_key, api_secret):
         logger.error(f"Balance error: {str(e)}")
         return None
 
+def get_total_and_available_balance(api_key, api_secret):
+    """
+    Lấy TỔNG số dư (USDT + USDC) và số dư KHẢ DỤNG tương ứng.
+    total_all   = tổng walletBalance (USDT+USDC)
+    avail_all   = tổng availableBalance (USDT+USDC)
+    """
+    try:
+        ts = int(time.time() * 1000)
+        params = {"timestamp": ts}
+        query = urllib.parse.urlencode(params)
+        sig = sign(query, api_secret)
+        url = f"https://fapi.binance.com/fapi/v2/account?{query}&signature={sig}"
+        headers = {"X-MBX-APIKEY": api_key}
+
+        data = binance_api_request(url, headers=headers)
+        if not data:
+            logger.error("❌ Không lấy được số dư từ Binance")
+            return None, None
+
+        total_all = 0.0
+        available_all = 0.0
+
+        for asset in data["assets"]:
+            if asset["asset"] in ("USDT", "USDC"):
+                available_all += float(asset["availableBalance"])
+                total_all += float(asset["walletBalance"])
+
+        logger.info(
+            f"💰 Tổng số dư (USDT+USDC): {total_all:.2f}, "
+            f"Khả dụng: {available_all:.2f}"
+        )
+        return total_all, available_all
+    except Exception as e:
+        logger.error(f"Lỗi lấy tổng số dư: {str(e)}")
+        return None, None
+
+
 def place_order(symbol, side, qty, api_key, api_secret):
     if not symbol: return None
     try:
@@ -1073,10 +1110,27 @@ class BaseBot:
                 self.stop_symbol(symbol)
                 return False
 
-            balance = get_balance(self.api_key, self.api_secret)
-            if balance is None or balance <= 0:
-                self.log(f"❌ {symbol} - Insufficient balance")
+            total_balance, available_balance = get_total_and_available_balance(
+                self.api_key, self.api_secret
+            )
+            if total_balance is None or total_balance <= 0:
+                self.log(f"❌ {symbol} - Không đủ tổng số dư")
                 return False
+    
+            # Dùng tổng số dư để tính % vốn
+            balance = total_balance
+    
+            # Tính số tiền CẦN dùng theo % tổng số dư để kiểm tra trước
+            required_usd = balance * (self.percent / 100)
+    
+            # Nếu số tiền cần dùng > số dư khả dụng → bỏ lệnh, tránh gửi lên Binance rồi lỗi
+            if available_balance is None or available_balance <= 0 or required_usd > available_balance:
+                self.log(
+                    f"❌ {symbol} - Không đủ số dư khả dụng:"
+                    f" cần {required_usd:.2f}, khả dụng {available_balance or 0:.2f}"
+                )
+                return False
+
 
             current_price = self.get_current_price(symbol)
             if current_price <= 0:
