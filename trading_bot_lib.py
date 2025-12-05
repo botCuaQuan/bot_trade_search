@@ -903,6 +903,7 @@ class BaseBot:
                     self.log(f"❌ Lỗi hệ thống: {str(e)}")
                     self.last_error_log_time = time.time()
                 time.sleep(5)
+
     def _process_single_symbol(self, symbol):
         """Xử lý một symbol duy nhất - TRẢ VỀ True NẾU VỪA VÀO LỆNH THÀNH CÔNG"""
         try:
@@ -916,7 +917,7 @@ class BaseBot:
             
             # Xử lý theo trạng thái
             if symbol_info['position_open']:
-                # Kiểm tra đóng lệnh
+                # Kiểm tra đóng lệnh thông minh (ROI trigger + exit signal)
                 if self._check_smart_exit_condition(symbol):
                     return False
                 
@@ -950,7 +951,8 @@ class BaseBot:
                 return False
             
             current_price = self.get_current_price(symbol)
-            if current_price <= 0: return False
+            if current_price <= 0:
+                return False
             
             if self.symbol_data[symbol]['side'] == "BUY":
                 profit = (current_price - self.symbol_data[symbol]['entry']) * abs(self.symbol_data[symbol]['qty'])
@@ -958,7 +960,8 @@ class BaseBot:
                 profit = (self.symbol_data[symbol]['entry'] - current_price) * abs(self.symbol_data[symbol]['qty'])
                 
             invested = self.symbol_data[symbol]['entry'] * abs(self.symbol_data[symbol]['qty']) / self.lev
-            if invested <= 0: return False
+            if invested <= 0:
+                return False
                 
             current_roi = (profit / invested) * 100
             
@@ -1004,11 +1007,12 @@ class BaseBot:
         except Exception as e:
             self.log(f"❌ Lỗi tìm coin mới: {str(e)}")
             return None
-            
+
     def _add_symbol(self, symbol):
         if symbol in self.active_symbols or len(self.active_symbols) >= self.max_coins:
             return False
-        if self.coin_finder.has_existing_position(symbol): return False
+        if self.coin_finder.has_existing_position(symbol):
+            return False
         
         self.symbol_data[symbol] = {
             'status': 'waiting', 'side': '', 'qty': 0, 'entry': 0, 'current_price': 0,
@@ -1097,7 +1101,8 @@ class BaseBot:
                 return False
 
             self._check_symbol_position(symbol)
-            if self.symbol_data[symbol]['position_open']: return False
+            if self.symbol_data[symbol]['position_open']:
+                return False
 
             current_leverage = self.coin_finder.get_symbol_leverage(symbol)
             if current_leverage < self.lev:
@@ -1110,6 +1115,7 @@ class BaseBot:
                 self.stop_symbol(symbol)
                 return False
 
+            # 🔥 DÙNG TỔNG SỐ DƯ + KIỂM TRA SỐ DƯ KHẢ DỤNG
             total_balance, available_balance = get_total_and_available_balance(
                 self.api_key, self.api_secret
             )
@@ -1130,7 +1136,6 @@ class BaseBot:
                     f" cần {required_usd:.2f}, khả dụng {available_balance or 0:.2f}"
                 )
                 return False
-
 
             current_price = self.get_current_price(symbol)
             if current_price <= 0:
@@ -1180,7 +1185,8 @@ class BaseBot:
                               f"🤖 Bot: {self.bot_id}\n📌 Direction: {side}\n"
                               f"🏷️ Entry: {avg_price:.4f}\n📊 Quantity: {executed_qty:.4f}\n"
                               f"💰 Leverage: {self.lev}x\n🎯 TP: {self.tp}% | 🛡️ SL: {self.sl}%")
-                    if self.roi_trigger: message += f" | 🎯 ROI Trigger: {self.roi_trigger}%"
+                    if self.roi_trigger:
+                        message += f" | 🎯 ROI Trigger: {self.roi_trigger}%"
                     
                     self.log(message)
                     return True
@@ -1258,7 +1264,8 @@ class BaseBot:
             return
 
         current_price = self.get_current_price(symbol)
-        if current_price <= 0: return
+        if current_price <= 0:
+            return
 
         if self.symbol_data[symbol]['side'] == "BUY":
             profit = (current_price - self.symbol_data[symbol]['entry']) * abs(self.symbol_data[symbol]['qty'])
@@ -1266,7 +1273,8 @@ class BaseBot:
             profit = (self.symbol_data[symbol]['entry'] - current_price) * abs(self.symbol_data[symbol]['qty'])
             
         invested = self.symbol_data[symbol]['entry'] * abs(self.symbol_data[symbol]['qty']) / self.lev
-        if invested <= 0: return
+        if invested <= 0:
+            return
             
         roi = (profit / invested) * 100
 
@@ -1284,7 +1292,8 @@ class BaseBot:
             self._close_symbol_position(symbol, f"❌ Reached SL {self.sl}% (ROI: {roi:.2f}%)")
 
     def stop_symbol(self, symbol):
-        if symbol not in self.active_symbols: return False
+        if symbol not in self.active_symbols:
+            return False
         
         self.log(f"⛔ Stopping coin {symbol}...")
         
@@ -1299,8 +1308,10 @@ class BaseBot:
         self.ws_manager.remove_symbol(symbol)
         self.coin_manager.unregister_coin(symbol)
         
-        if symbol in self.symbol_data: del self.symbol_data[symbol]
-        if symbol in self.active_symbols: self.active_symbols.remove(symbol)
+        if symbol in self.symbol_data:
+            del self.symbol_data[symbol]
+        if symbol in self.active_symbols:
+            self.active_symbols.remove(symbol)
         
         self.bot_coordinator.bot_lost_coin(self.bot_id)
         self.log(f"✅ Stopped coin {symbol}")
@@ -1382,7 +1393,6 @@ class BaseBot:
                 self.log(f"❌ Global positions error: {str(e)}")
                 self.last_error_log_time = time.time()
 
-
     def get_next_side_based_on_comprehensive_analysis(self):
         """
         Lấy hướng ưu tiên toàn cục đã tính sẵn trong check_global_positions.
@@ -1401,16 +1411,26 @@ class BaseBot:
         if any(keyword in message for keyword in important_keywords):
             logger.warning(f"[{self.bot_id}] {message}")
             if self.telegram_bot_token and self.telegram_chat_id:
-                send_telegram(f"<b>{self.bot_id}</b>: {message}", 
-                             bot_token=self.telegram_bot_token, 
-                             default_chat_id=self.telegram_chat_id)
+                send_telegram(
+                    f"<b>{self.bot_id}</b>: {message}",
+                    bot_token=self.telegram_bot_token,
+                    default_chat_id=self.telegram_chat_id
+                )
 
 class GlobalMarketBot(BaseBot):
     def __init__(self, symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
-                 api_key, api_secret, telegram_bot_token, telegram_chat_id, bot_id=None, **kwargs):
-        super().__init__(symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
-                         api_key, api_secret, telegram_bot_token, telegram_chat_id,
-                         "RSI-Volume-System-Queue", bot_id=bot_id, **kwargs)
+                 api_key, api_secret, telegram_bot_token, telegram_chat_id,
+                 bot_id=None, roi_scale_in=None, max_scale_in_times=0, **kwargs):
+        super().__init__(
+            symbol, lev, percent, tp, sl, roi_trigger, ws_manager,
+            api_key, api_secret, telegram_bot_token, telegram_chat_id,
+            "RSI-Volume-System-Queue",
+            bot_id=bot_id,
+            roi_scale_in=roi_scale_in,
+            max_scale_in_times=max_scale_in_times,
+            **kwargs
+        )
+
 
 class BotManager:
     def __init__(self, api_key=None, api_secret=None, telegram_bot_token=None, telegram_chat_id=None):
@@ -1591,9 +1611,17 @@ class BotManager:
                      bot_token=self.telegram_bot_token, 
                      default_chat_id=self.telegram_chat_id)
 
-    def add_bot(self, symbol, lev, percent, tp, sl, roi_trigger, strategy_type, bot_count=1, **kwargs):
-        if sl == 0: sl = None
-            
+    def add_bot(self, symbol, lev, percent, tp, sl, roi_trigger, strategy_type,
+                bot_count=1, roi_scale_in=None, max_scale_in_times=0, **kwargs):
+        """
+        Tạo bot mới – đã hỗ trợ:
+        - roi_scale_in       → ROI nhồi mỗi bậc (%, ví dụ 5, 10...)
+        - max_scale_in_times → Số lần nhồi tối đa (0–3)
+        """
+        if sl == 0:
+            sl = None
+             
+        # Check API
         if not self.api_key or not self.api_secret:
             self.log("❌ API Key not set in BotManager")
             return False
@@ -1607,20 +1635,25 @@ class BotManager:
         
         try:
             for i in range(bot_count):
+                # Tạo bot_id
                 if bot_mode == 'static' and symbol:
                     bot_id = f"STATIC_{strategy_type}_{int(time.time())}_{i}"
                 else:
                     bot_id = f"DYNAMIC_{strategy_type}_{int(time.time())}_{i}"
                 
-                if bot_id in self.bots: continue
+                if bot_id in self.bots:
+                    continue
                 
                 bot_class = GlobalMarketBot
                 
+                # Tạo bot và TRUYỀN THÊM 2 THAM SỐ NHỒI
                 bot = bot_class(
                     symbol, lev, percent, tp, sl, roi_trigger, self.ws_manager,
                     self.api_key, self.api_secret, self.telegram_bot_token, self.telegram_chat_id,
                     coin_manager=self.coin_manager, symbol_locks=self.symbol_locks,
-                    bot_coordinator=self.bot_coordinator, bot_id=bot_id, max_coins=1
+                    bot_coordinator=self.bot_coordinator, bot_id=bot_id, max_coins=1,
+                    roi_scale_in=roi_scale_in,
+                    max_scale_in_times=max_scale_in_times
                 )
                 
                 bot._bot_manager = self
@@ -1632,13 +1665,15 @@ class BotManager:
             return False
         
         if created_count > 0:
-            roi_info = f" | 🎯 ROI Trigger: {roi_trigger}%" if roi_trigger else " | 🎯 ROI Trigger: Off"
+            roi_trigger_info = f" | 🎯 ROI Trigger: {roi_trigger}%" if roi_trigger else " | 🎯 ROI Trigger: Off"
+            roi_scale_info   = f" | 📈 ROI Nhồi: {roi_scale_in}%" if roi_scale_in else " | 📈 ROI Nhồi: Off"
+            scale_times_info = f" | 🔁 Số lần nhồi: {max_scale_in_times}" if max_scale_in_times else " | 🔁 Số lần nhồi: 0"
             
             success_msg = (f"✅ <b>CREATED {created_count} QUEUE BOTS</b>\n\n"
-                          f"🎯 Strategy: {strategy_type}\n💰 Leverage: {lev}x\n"
-                          f"📈 % Balance: {percent}%\n🎯 TP: {tp}%\n"
-                          f"🛡️ SL: {sl if sl is not None else 'Off'}%{roi_info}\n"
-                          f"🔧 Mode: {bot_mode}\n🔢 Bot count: {created_count}\n")
+                           f"🎯 Strategy: {strategy_type}\n💰 Leverage: {lev}x\n"
+                           f"📈 % Balance: {percent}%\n🎯 TP: {tp}%\n"
+                           f"🛡️ SL: {sl if sl is not None else 'Off'}%{roi_trigger_info}{roi_scale_info}{scale_times_info}\n"
+                           f"🔧 Mode: {bot_mode}\n🔢 Bot count: {created_count}\n")
             
             if bot_mode == 'static' and symbol:
                 success_msg += f"🔗 Initial coin: {symbol}\n"
@@ -1646,17 +1681,18 @@ class BotManager:
                 success_msg += f"🔗 Coin: Auto search\n"
             
             success_msg += (f"\n🔄 <b>QUEUE SYSTEM ACTIVATED</b>\n"
-                          f"• First bot in queue finds coin first\n"
-                          f"• Bot enters position → next bot finds IMMEDIATELY\n"
-                          f"• Bots with coins cannot enter queue\n"
-                          f"• Bots closing positions can re-enter queue\n\n"
-                          f"⚡ <b>EACH BOT RUNS IN SEPARATE THREAD</b>")
+                           f"• First bot in queue finds coin first\n"
+                           f"• Bot enters position → next bot finds IMMEDIATELY\n"
+                           f"• Bots with coins cannot enter queue\n"
+                           f"• Bots closing positions can re-enter queue\n\n"
+                           f"⚡ <b>EACH BOT RUNS IN SEPARATE THREAD</b>")
             
             self.log(success_msg)
             return True
         else:
             self.log("❌ Cannot create bot")
             return False
+
 
     def stop_coin(self, symbol):
         stopped_count = 0
