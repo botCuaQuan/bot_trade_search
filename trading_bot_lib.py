@@ -26,10 +26,10 @@ _BINANCE_RATE_LOCK = threading.Lock()
 _BINANCE_MIN_INTERVAL = 0.1
 
 _USDC_CACHE = {"cặp": [], "cập_nhật_cuối": 0}
-_USDC_CACHE_TTL = 60
+_USDC_CACHE_TTL = 30
 
 _LEVERAGE_CACHE = {"dữ_liệu": {}, "cập_nhật_cuối": 0}
-_LEVERAGE_CACHE_TTL = 60
+_LEVERAGE_CACHE_TTL = 3600
 
 _SYMBOL_BLACKLIST = {'BTCUSDC', 'ETHUSDC'}
 
@@ -85,7 +85,7 @@ def create_cancel_keyboard():
 
 def create_bot_count_keyboard():
     return {
-        "keyboard": [[{"text": "1"}, {"text": "2"}, {"text": "3"}], [{"text": "5"}, {"text": "10"}], [{"text": "❌ Hủy bỏ"}]],
+        "keyboard": [[{"text": "1"}, {"text": "3"}, {"text": "5"}], [{"text": "10"}, {"text": "20"}], [{"text": "❌ Hủy bỏ"}]],
         "resize_keyboard": True, "one_time_keyboard": True
     }
 
@@ -183,8 +183,8 @@ def create_pyramiding_n_keyboard():
 def create_pyramiding_x_keyboard():
     return {
         "keyboard": [
-            [{"text": "10"}, {"text": "20"}, {"text": "30"}],
-            [{"text": "40"}, {"text": "50"}, {"text": "100"}],
+            [{"text": "100"}, {"text": "200"}, {"text": "300"}],
+            [{"text": "400"}, {"text": "500"}, {"text": "1000"}],
             [{"text": "❌ Hủy bỏ"}]
         ],
         "resize_keyboard": True, "one_time_keyboard": True
@@ -648,7 +648,7 @@ class SmartCoinFinder:
         rs = avg_gains / avg_losses
         return 100 - (100 / (1 + rs))
     
-    def get_rsi_signal(self, symbol, volume_threshold=20):
+    def get_rsi_signal(self, symbol, volume_threshold=10):
         try:
             current_time = time.time()
             cache_key = f"{symbol}_{volume_threshold}"
@@ -709,10 +709,10 @@ class SmartCoinFinder:
             return None
     
     def get_entry_signal(self, symbol):
-        return self.get_rsi_signal(symbol, volume_threshold=20)
+        return random.choice(["BUY", "SELL", None])
     
     def get_exit_signal(self, symbol):
-        return self.get_rsi_signal(symbol, volume_threshold=40)
+        return self.get_rsi_signal(symbol, volume_threshold=100)
     
     def has_existing_position(self, symbol):
         try:
@@ -744,7 +744,7 @@ class SmartCoinFinder:
                 max_lev = self.get_symbol_leverage(symbol)
                 if max_lev < required_leverage: continue
 
-                time.sleep(0.05)
+                time.sleep(1)
                 entry_signal = self.get_entry_signal(symbol)
                 if entry_signal in ["BUY", "SELL"]:
                     valid_symbols.append((symbol, entry_signal))
@@ -1161,7 +1161,7 @@ class BaseBot:
                 return False
 
             current_price = self.get_current_price(symbol)
-            if current_price <= 0:
+            if current_price < 0:
                 self.log(f"❌ {symbol} - Lỗi giá khi nhồi lệnh")
                 return False
 
@@ -2227,7 +2227,7 @@ class BotManager:
             else:
                 try:
                     bot_count = int(text)
-                    if bot_count <= 0 or bot_count > 10:
+                    if bot_count <= 0 or bot_count > 20:
                         send_telegram("⚠️ Số bot phải từ 1-10. Vui lòng chọn:",
                                     chat_id=chat_id, reply_markup=create_bot_count_keyboard(),
                                     bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
