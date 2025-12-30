@@ -2397,8 +2397,8 @@ class BotManager:
             else:
                 try:
                     pyramiding_n = int(text)
-                    if pyramiding_n < 0 or pyramiding_n > 5:
-                        send_telegram("⚠️ Số lần nhồi lệnh phải từ 0-5. Vui lòng chọn:",
+                    if pyramiding_n < 0 or pyramiding_n > 15:
+                        send_telegram("⚠️ Số lần nhồi lệnh phải từ 0-15. Vui lòng chọn:",
                                     chat_id=chat_id, reply_markup=create_pyramiding_n_keyboard(),
                                     bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
                         return
