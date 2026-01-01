@@ -1343,9 +1343,6 @@ class BaseBot:
                         self.symbol_data[symbol]['entry'] = float(pos.get('entryPrice', 0))
                         
                         # Khởi tạo thông tin nhồi lệnh nếu có
-                        if self.pyramiding_enabled:
-                            self.symbol_data[symbol]['pyramiding_count'] = 0
-                            self.symbol_data[symbol]['next_pyramiding_roi'] = self.pyramiding_x
                         
                         current_price = self.get_current_price(symbol)
                         if current_price > 0:
