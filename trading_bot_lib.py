@@ -1684,117 +1684,60 @@ class BaseBot:
 
     def check_global_positions(self):
         """
-        Cập nhật tổng khối lượng LONG/SHORT toàn tài khoản
-        (đã nhân với đòn bẩy) và quyết định hướng ưu tiên (next_global_side)
-        dựa trên KHỐI LƯỢNG THỰC TẾ thay vì chỉ đếm số lệnh.
-
-        CƠ CHẾ:
-        - Nếu tổng volume LONG  > tổng volume SHORT  → ưu tiên SELL (giảm thiên LONG)
-        - Nếu tổng volume SHORT > tổng volume LONG   → ưu tiên BUY  (giảm thiên SHORT)
-        - Nếu hai bên xấp xỉ nhau                    → random BUY/SELL
+        Quyết định hướng vào lệnh tiếp theo dựa trên ROI TỔNG:
+        - Bên nào lỗ (ROI âm) NHIỀU HƠN → vào NGƯỢC lại bên đó
         """
         try:
             positions = get_positions(api_key=self.api_key, api_secret=self.api_secret)
-
-            # Không có vị thế nào
             if not positions:
-                self.global_long_count = 0
-                self.global_short_count = 0
-                self.global_long_pnl = 0
-                self.global_short_pnl = 0
-                self.global_long_volume = 0.0
-                self.global_short_volume = 0.0
-
-                # Không có gì → chọn ngẫu nhiên
                 self.next_global_side = random.choice(["BUY", "SELL"])
-                return
-
-            long_count, short_count = 0, 0
-            long_volume, short_volume = 0.0, 0.0
-
-            # TÍNH TỔNG KHỐI LƯỢNG (QTY * PRICE * LEVERAGE) CHO LONG VÀ SHORT
+                return self.next_global_side
+    
+            long_invested = 0.0
+            short_invested = 0.0
+            long_pnl = 0.0
+            short_pnl = 0.0
+    
             for pos in positions:
-                position_amt = float(pos.get("positionAmt", 0.0))
-                if position_amt == 0:
+                qty = float(pos.get("positionAmt", 0))
+                entry = float(pos.get("entryPrice", 0))
+                unrealized = float(pos.get("unRealizedProfit", 0))
+    
+                if qty == 0 or entry <= 0:
                     continue
-
-                # Đếm số lệnh cho mục đích debug/log
-                if position_amt > 0:
-                    long_count += 1
-                elif position_amt < 0:
-                    short_count += 1
-
-                # Lấy leverage, markPrice/entryPrice để ước lượng notional
-                try:
-                    lev = float(pos.get("leverage", 1.0))
-                except Exception:
-                    lev = 1.0
-
-                price = 0.0
-                try:
-                    price = float(pos.get("markPrice") or 0.0)
-                except Exception:
-                    price = 0.0
-
-                if price <= 0:
-                    try:
-                        price = float(pos.get("entryPrice") or 0.0)
-                    except Exception:
-                        price = 0.0
-
-                # Nếu vẫn không có giá thì bỏ qua position này
-                if price <= 0:
-                    continue
-
-                notional = abs(position_amt) * price
-                effective_volume = notional * lev  # khối lượng sau khi nhân đòn bẩy
-
-                if position_amt > 0:
-                    long_volume += effective_volume
-                elif position_amt < 0:
-                    short_volume += effective_volume
-
-            self.global_long_count = long_count
-            self.global_short_count = short_count
-            self.global_long_pnl = 0
-            self.global_short_pnl = 0
-            self.global_long_volume = long_volume
-            self.global_short_volume = short_volume
-
-            # --- LOGIC CHỌN HƯỚNG NẰM Ở ĐÂY ---
-            # ✅ CÂN BẰNG THEO VOLUME: nhiều volume LONG → ưu tiên SELL, nhiều volume SHORT → ưu tiên BUY
-            # Để tránh nhiễu do chênh lệch nhỏ, có thể đặt một ngưỡng tối thiểu (ví dụ 1%)
-            if long_volume > 0 or short_volume > 0:
-                # Nếu chênh lệch rất nhỏ (<1%), coi như cân bằng
-                diff = abs(long_volume - short_volume)
-                total = long_volume + short_volume
-                if total > 0:
-                    imbalance = diff / total
-                else:
-                    imbalance = 0
-
-                if imbalance < 0.01:
-                    # Coi như cân bằng
-                    self.next_global_side = random.choice(["BUY", "SELL"])
-                else:
-                    if long_volume > short_volume:
-                        self.next_global_side = "SELL"
-                    else:
-                        self.next_global_side = "BUY"
+    
+                invested = entry * abs(qty) / self.lev
+    
+                if qty > 0:  # LONG
+                    long_invested += invested
+                    long_pnl += unrealized
+                else:        # SHORT
+                    short_invested += invested
+                    short_pnl += unrealized
+    
+            long_roi = (long_pnl / long_invested * 100) if long_invested > 0 else 0
+            short_roi = (short_pnl / short_invested * 100) if short_invested > 0 else 0
+    
+            # ===== LOGIC QUYẾT ĐỊNH =====
+            if long_roi < short_roi:
+                self.next_global_side = "SELL"   # LONG lỗ nhiều hơn → đánh ngược
+            elif short_roi < long_roi:
+                self.next_global_side = "BUY"    # SHORT lỗ nhiều hơn → đánh ngược
             else:
-                # Nếu không lấy được volume thì fallback về đếm số lệnh
-                if long_count > short_count:
-                    self.next_global_side = "SELL"
-                elif short_count > long_count:
-                    self.next_global_side = "BUY"
-                else:
-                    self.next_global_side = random.choice(["BUY", "SELL"])
-
+                self.next_global_side = random.choice(["BUY", "SELL"])
+    
+            self.log(
+                f"🌍 ROI TOÀN TÀI KHOẢN | "
+                f"LONG: {long_roi:.2f}% | SHORT: {short_roi:.2f}% "
+                f"→ Ưu tiên: {self.next_global_side}"
+            )
+    
+            return self.next_global_side
+    
         except Exception as e:
-            if time.time() - self.last_error_log_time > 30:
-                self.log(f"❌ Lỗi vị thế toàn cục: {str(e)}")
-                self.last_error_log_time = time.time()
-
+            self.log(f"❌ Lỗi phân tích ROI toàn cục: {str(e)}")
+            self.next_global_side = random.choice(["BUY", "SELL"])
+            return self.next_global_side
 
     def get_next_side_based_on_comprehensive_analysis(self):
         """
