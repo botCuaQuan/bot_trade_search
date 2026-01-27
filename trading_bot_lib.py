@@ -431,9 +431,9 @@ def get_margin_safety_info(api_key, api_secret):
         margin_balance = float(data.get("totalMarginBalance", 0.0))
         maint_margin = float(data.get("totalMaintMargin", 0.0))
 
-        if maint_margin <= 0:
+        if maint_margin < 0:
             logger.warning(
-                f"⚠️ Maint margin <= 0 (margin_balance={margin_balance:.4f}, maint_margin={maint_margin:.4f})"
+                f"⚠️ Maint margin < 0 (margin_balance={margin_balance:.4f}, maint_margin={maint_margin:.4f})"
             )
             return margin_balance, maint_margin, None
 
