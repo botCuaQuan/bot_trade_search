@@ -987,8 +987,8 @@ class BaseBot:
                         time.sleep(5)
                         continue
                 
-                # KIỂM TRA VỊ THẾ TOÀN TÀI KHOẢN ĐỊNH KỲ
-                if current_time - self.last_global_position_check > 30:
+                # KIỂM TRA VỊ THẾ TOÀN TÀI KHOẢN ĐỊNH KỲ (chỉ cho kiểu basic)
+                if self.trading_type == "basic" and current_time - self.last_global_position_check > 30:
                     self.check_global_positions()
                     self.last_global_position_check = current_time
                 
@@ -1075,13 +1075,22 @@ class BaseBot:
                     entry_signal = self.coin_finder.get_entry_signal(symbol)
                     
                     if entry_signal:
-                        target_side = self.get_next_side_based_on_comprehensive_analysis()
-                        
-                        if entry_signal == target_side:
+                        # ⭐ QUAN TRỌNG: XỬ LÝ KHÁC NHAU CHO TỪNG KIỂU GIAO DỊCH
+                        if self.trading_type == "price_based":
+                            # Kiểu price-based: KHÔNG kiểm tra hướng toàn tài khoản, vào lệnh ngay khi có tín hiệu
                             if not self.coin_finder.has_existing_position(symbol):
-                                if self._open_symbol_position(symbol, target_side):
+                                if self._open_symbol_position(symbol, entry_signal):
                                     symbol_info['last_trade_time'] = current_time
-                                    return True  # 🎯 TRẢ VỀ True KHI VÀO LỆNH THÀNH CÔNG
+                                    return True
+                        else:
+                            # Kiểu basic: Kiểm tra hướng toàn tài khoản
+                            target_side = self.get_next_side_based_on_comprehensive_analysis()
+                            
+                            if entry_signal == target_side:
+                                if not self.coin_finder.has_existing_position(symbol):
+                                    if self._open_symbol_position(symbol, target_side):
+                                        symbol_info['last_trade_time'] = current_time
+                                        return True
                 return False
                 
         except Exception as e:
@@ -1805,8 +1814,14 @@ class BaseBot:
     def get_next_side_based_on_comprehensive_analysis(self):
         """
         Lấy hướng ưu tiên toàn cục đã tính sẵn trong check_global_positions.
-        Không còn dùng PnL, chỉ dựa trên số lượng lệnh.
+        ⭐ SỬA: Chỉ dùng cho kiểu basic, không dùng cho price_based
         """
+        # ⭐ QUAN TRỌNG: Nếu là price_based, KHÔNG dùng phân tích toàn tài khoản
+        if self.trading_type == "price_based":
+            # Trả về ngẫu nhiên vì kiểu price-based đã tự động ép hướng
+            return random.choice(["BUY", "SELL"])
+        
+        # Kiểu basic: dùng logic phân tích toàn tài khoản
         self.check_global_positions()
 
         if self.next_global_side in ["BUY", "SELL"]:
