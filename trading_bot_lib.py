@@ -1,4 +1,4 @@
-# trading_bot_lib_ep_huong_chung.py (ĐÃ SỬA - CHỈ CÒN 1 CHIẾN LƯỢC CÂN BẰNG)
+# trading_bot_lib (50).py (ĐÃ SỬA - CHỈ CÒN 1 CHIẾN LƯỢC CÂN BẰNG)
 import json
 import hmac
 import hashlib
@@ -29,7 +29,7 @@ _USDC_CACHE = {"cặp": [], "cập_nhật_cuối": 0}
 _USDC_CACHE_TTL = 30
 
 _LEVERAGE_CACHE = {"dữ_liệu": {}, "cập_nhật_cuối": 0}
-_LEVERAGE_CACHE_TTL = 3600
+_LEVERAGE_CACHE_TTL = 1800  # Giảm từ 3600 xuống 1800 giây (30 phút)
 
 _SYMBOL_BLACKLIST = {'BTCUSDC', 'ETHUSDC'}
 
@@ -38,9 +38,11 @@ _USDC_COINS_CACHE = {
     "data": [],  # Danh sách coin với đầy đủ thông tin
     "last_volume_update": 0,  # Thời gian cập nhật volume lần cuối
     "last_price_update": 0,  # Thời gian cập nhật giá lần cuối
+    "last_leverage_update": 0,  # Thời gian cập nhật đòn bẩy lần cuối
 }
-_VOLUME_CACHE_TTL = 6 * 3600  # 6 giờ
-_PRICE_CACHE_TTL = 300  # 5 phút
+_VOLUME_CACHE_TTL = 1800  # Giảm từ 6 giờ xuống 30 phút
+_PRICE_CACHE_TTL = 60     # Giảm từ 300 xuống 60 giây (1 phút)
+_LEVERAGE_CACHE_TTL = 3600  # 1 giờ cho cache đòn bẩy
 
 # ========== CẤU HÌNH CÂN BẰNG LỆNH ==========
 _BALANCE_CONFIG = {
@@ -408,6 +410,7 @@ def refresh_usdc_coins_cache():
             return False
         
         usdc_coins = []
+        leverage_updated_count = 0
         
         for symbol_info in data.get('symbols', []):
             symbol = symbol_info.get('symbol', '')
@@ -419,11 +422,41 @@ def refresh_usdc_coins_cache():
             if symbol in _SYMBOL_BLACKLIST:
                 continue
             
-            max_leverage = 100
+            # Lấy đòn bẩy tối đa từ API - FIXED
+            max_leverage = 1  # Mặc định 1x thay vì 100x
+            leverage_found = False
+            
+            # Binance trả về leverage trong filters
             for f in symbol_info.get('filters', []):
-                if f['filterType'] == 'LEVERAGE' and 'maxLeverage' in f:
-                    max_leverage = int(f['maxLeverage'])
-                    break
+                if f['filterType'] == 'LEVERAGE':
+                    # Binance trả về: "brackets": [{"bracket": 1, "initialLeverage": 75, ...}]
+                    # Hoặc "maxLeverage": "75"
+                    if 'maxLeverage' in f:
+                        try:
+                            max_leverage = int(f['maxLeverage'])
+                            leverage_found = True
+                            break
+                        except (ValueError, TypeError):
+                            pass
+                    elif 'brackets' in f and isinstance(f['brackets'], list) and len(f['brackets']) > 0:
+                        try:
+                            # Lấy đòn bẩy cao nhất từ brackets
+                            brackets = f['brackets']
+                            max_leverage = 1
+                            for bracket in brackets:
+                                if 'initialLeverage' in bracket:
+                                    lev = int(bracket['initialLeverage'])
+                                    if lev > max_leverage:
+                                        max_leverage = lev
+                            leverage_found = True
+                            break
+                        except (ValueError, TypeError, KeyError):
+                            pass
+            
+            # Nếu không tìm thấy đòn bẩy, đặt mặc định 1x
+            if not leverage_found:
+                max_leverage = 1
+                logger.warning(f"⚠️ Không tìm thấy đòn bẩy cho {symbol}, đặt mặc định 1x")
             
             step_size = 0.001
             for f in symbol_info.get('filters', []):
@@ -440,16 +473,22 @@ def refresh_usdc_coins_cache():
                 'last_price_update': 0,
                 'last_volume_update': 0
             })
+            
+            if max_leverage != 1:
+                leverage_updated_count += 1
         
         _USDC_COINS_CACHE["data"] = usdc_coins
         _USDC_COINS_CACHE["last_volume_update"] = time.time()
-        logger.info(f"✅ Đã cập nhật danh sách {len(usdc_coins)} coin USDC với đòn bẩy")
+        _USDC_COINS_CACHE["last_leverage_update"] = time.time()
+        
+        logger.info(f"✅ Đã cập nhật danh sách {len(usdc_coins)} coin USDC")
+        logger.info(f"📊 Đòn bẩy: {leverage_updated_count} coin có đòn bẩy >1x")
         
         # Log một số coin để debug
         if usdc_coins:
-            sample = usdc_coins[:5]
+            sample = usdc_coins[:10]  # Tăng từ 5 lên 10 để kiểm tra
             for coin in sample:
-                logger.debug(f"  Coin mẫu: {coin['symbol']} - Leverage: {coin['max_leverage']}x")
+                logger.info(f"  Coin mẫu: {coin['symbol']} - Leverage: {coin['max_leverage']}x - Step: {coin['step_size']}")
         
         return True
         
@@ -553,6 +592,11 @@ def filter_and_sort_coins_for_side(side, excluded_coins=None, required_leverage=
     logger.info(f"🔍 Đang lọc coin cho hướng {side}. Tổng coin có sẵn: {len(all_coins)}")
     logger.info(f"🔧 Cấu hình: MUA < {_BALANCE_CONFIG['buy_price_threshold']}USDC, BÁN > {_BALANCE_CONFIG['sell_price_threshold']}USDC, Leverage tối thiểu: {required_leverage}x")
     
+    # Debug: Log đòn bẩy của 10 coin đầu tiên
+    logger.info("📊 DEBUG - Kiểm tra đòn bẩy của 10 coin đầu tiên:")
+    for i, coin in enumerate(all_coins[:10]):
+        logger.info(f"  {i+1}. {coin['symbol']} - Leverage: {coin['max_leverage']}x, Giá: {coin['price']:.4f}")
+    
     # Biến đếm để debug
     excluded_count = 0
     leverage_fail_count = 0
@@ -572,8 +616,10 @@ def filter_and_sort_coins_for_side(side, excluded_coins=None, required_leverage=
             excluded_count += 1
             continue
             
+        # KIỂM TRA ĐÒN BẨY - FIXED: Sử dụng max_leverage từ cache
         if coin['max_leverage'] < required_leverage:
             leverage_fail_count += 1
+            logger.debug(f"  ❌ {symbol} - Đòn bẩy không đủ: {coin['max_leverage']}x < {required_leverage}x")
             continue
             
         if coin['price'] <= 0:
@@ -662,34 +708,109 @@ def force_refresh_coin_cache():
         return False
 
 def get_max_leverage(symbol, api_key, api_secret):
-    global _LEVERAGE_CACHE
+    """Lấy đòn bẩy tối đa của symbol - FIXED VERSION"""
+    global _LEVERAGE_CACHE, _USDC_COINS_CACHE
+    
     try:
         symbol = symbol.upper()
         current_time = time.time()
         
+        # ƯU TIÊN 1: Kiểm tra trong cache coin chính
+        for coin in _USDC_COINS_CACHE.get("data", []):
+            if coin.get('symbol') == symbol:
+                leverage = coin.get('max_leverage')
+                if leverage and leverage > 0:
+                    # Cập nhật vào cache đòn bẩy riêng
+                    _LEVERAGE_CACHE["dữ_liệu"][symbol] = leverage
+                    _LEVERAGE_CACHE["cập_nhật_cuối"] = current_time
+                    logger.debug(f"✅ Lấy đòn bẩy {symbol} từ cache coin: {leverage}x")
+                    return leverage
+        
+        # ƯU TIÊN 2: Kiểm tra cache đòn bẩy riêng
         if (symbol in _LEVERAGE_CACHE["dữ_liệu"] and 
             current_time - _LEVERAGE_CACHE["cập_nhật_cuối"] < _LEVERAGE_CACHE_TTL):
-            return _LEVERAGE_CACHE["dữ_liệu"][symbol]
+            leverage = _LEVERAGE_CACHE["dữ_liệu"][symbol]
+            logger.debug(f"✅ Lấy đòn bẩy {symbol} từ cache riêng: {leverage}x")
+            return leverage
         
+        # ƯU TIÊN 3: Gọi API trực tiếp
+        logger.info(f"🔍 Đang lấy đòn bẩy từ API cho {symbol}...")
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         data = binance_api_request(url)
-        if not data: return 100
+        if not data: 
+            logger.warning(f"⚠️ Không thể lấy exchangeInfo, đặt đòn bẩy mặc định 1x cho {symbol}")
+            _LEVERAGE_CACHE["dữ_liệu"][symbol] = 1
+            _LEVERAGE_CACHE["cập_nhật_cuối"] = current_time
+            return 1
         
+        # Tìm symbol trong dữ liệu API
         for s in data['symbols']:
             if s['symbol'] == symbol:
-                for f in s['filters']:
-                    if f['filterType'] == 'LEVERAGE' and 'maxLeverage' in f:
-                        leverage = int(f['maxLeverage'])
-                        _LEVERAGE_CACHE["dữ_liệu"][symbol] = leverage
-                        _LEVERAGE_CACHE["cập_nhật_cuối"] = current_time
-                        return leverage
-        return 100
+                max_leverage = 1  # Mặc định 1x
+                leverage_found = False
+                
+                # Tìm đòn bẩy trong filters
+                for f in s.get('filters', []):
+                    if f['filterType'] == 'LEVERAGE':
+                        if 'maxLeverage' in f:
+                            try:
+                                max_leverage = int(f['maxLeverage'])
+                                leverage_found = True
+                            except (ValueError, TypeError):
+                                pass
+                        elif 'brackets' in f and isinstance(f['brackets'], list) and len(f['brackets']) > 0:
+                            try:
+                                brackets = f['brackets']
+                                max_leverage = 1
+                                for bracket in brackets:
+                                    if 'initialLeverage' in bracket:
+                                        lev = int(bracket['initialLeverage'])
+                                        if lev > max_leverage:
+                                            max_leverage = lev
+                                leverage_found = True
+                            except (ValueError, TypeError, KeyError):
+                                pass
+                        break
+                
+                if not leverage_found:
+                    logger.warning(f"⚠️ Không tìm thấy đòn bẩy cho {symbol} trong API response, đặt mặc định 1x")
+                    max_leverage = 1
+                
+                # Cập nhật cache
+                _LEVERAGE_CACHE["dữ_liệu"][symbol] = max_leverage
+                _LEVERAGE_CACHE["cập_nhật_cuối"] = current_time
+                
+                # Cập nhật cả cache coin nếu có
+                for coin in _USDC_COINS_CACHE.get("data", []):
+                    if coin.get('symbol') == symbol:
+                        coin['max_leverage'] = max_leverage
+                        break
+                
+                logger.info(f"✅ Lấy đòn bẩy {symbol} từ API: {max_leverage}x")
+                return max_leverage
+        
+        # Không tìm thấy symbol trong API
+        logger.warning(f"⚠️ Không tìm thấy symbol {symbol} trong API response, đặt mặc định 1x")
+        _LEVERAGE_CACHE["dữ_liệu"][symbol] = 1
+        _LEVERAGE_CACHE["cập_nhật_cuối"] = current_time
+        return 1
+        
     except Exception as e:
-        logger.error(f"Lỗi đòn bẩy {symbol}: {str(e)}")
-        return 100
+        logger.error(f"❌ Lỗi đòn bẩy {symbol}: {str(e)}")
+        # KHÔNG trả về 100 mặc định, trả về 1 để an toàn
+        return 1
 
 def get_step_size(symbol, api_key, api_secret):
     if not symbol: return 0.001
+    
+    # Ưu tiên lấy từ cache coin trước
+    for coin in _USDC_COINS_CACHE.get("data", []):
+        if coin.get('symbol') == symbol.upper():
+            step_size = coin.get('step_size', 0.001)
+            if step_size > 0:
+                return step_size
+    
+    # Nếu không có trong cache, gọi API
     url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
     try:
         data = binance_api_request(url)
@@ -1029,6 +1150,7 @@ class SmartCoinFinder:
             return random.choice(["BUY", "SELL"])
     
     def get_symbol_leverage(self, symbol):
+        """Lấy đòn bẩy tối đa của symbol - Sử dụng hàm đã fix"""
         return get_max_leverage(symbol, self.api_key, self.api_secret)
     
     def has_existing_position(self, symbol):
@@ -1097,14 +1219,22 @@ class SmartCoinFinder:
                 
                 # Kiểm tra vị thế tồn tại
                 if self.has_existing_position(symbol):
+                    logger.debug(f"  ⏭️ {symbol} - Đã có vị thế, bỏ qua")
                     continue
                 
                 # Kiểm tra xem coin có đang bị bot khác quản lý không
                 if self._bot_manager:
                     if self._bot_manager.coin_manager.is_coin_active(symbol):
+                        logger.debug(f"  ⏭️ {symbol} - Đang được bot khác quản lý, bỏ qua")
                         continue
                 
-                logger.info(f"✅ Tìm thấy coin {symbol} phù hợp ({target_side})")
+                # Kiểm tra đòn bẩy thực tế một lần nữa
+                actual_leverage = self.get_symbol_leverage(symbol)
+                if actual_leverage < required_leverage:
+                    logger.warning(f"  ⚠️ {symbol} - Đòn bẩy thực tế {actual_leverage}x < yêu cầu {required_leverage}x")
+                    continue
+                
+                logger.info(f"✅ Tìm thấy coin {symbol} phù hợp ({target_side}) - Giá: {coin['price']:.4f}, Leverage: {actual_leverage}x")
                 return symbol
             
             logger.warning(f"⚠️ Đã duyệt {len(filtered_coins)} coin nhưng không có coin nào chưa có vị thế")
@@ -1304,6 +1434,11 @@ class BaseBot:
                 coins_count = len(cache_info.get("data", []))
                 
                 logger.info(f"✅ Đã khởi tạo cache {coins_count} coin")
+                
+                # Debug: log đòn bẩy của 10 coin đầu tiên
+                logger.info("📊 DEBUG - Kiểm tra đòn bẩy cache:")
+                for i, coin in enumerate(cache_info.get("data", [])[:10]):
+                    logger.info(f"  {i+1}. {coin['symbol']} - Leverage: {coin['max_leverage']}x")
             else:
                 logger.error("❌ Không thể khởi tạo cache coin")
                 
@@ -1311,7 +1446,7 @@ class BaseBot:
             logger.error(f"❌ Lỗi khởi tạo cache: {str(e)}")
 
     def _run(self):
-        """Vòng lặp chính"""
+        """Vòng lặp chính - FIXED: Thêm coin vào active_symbols khi tìm thấy"""
         if not _USDC_COINS_CACHE["data"]:
             self._initialize_coin_cache()
         
@@ -1324,9 +1459,10 @@ class BaseBot:
             try:
                 current_time = time.time()
                 
-                if current_time - _USDC_COINS_CACHE["last_volume_update"] > 3600:
+                # Cập nhật cache định kỳ
+                if current_time - _USDC_COINS_CACHE["last_volume_update"] > 1800:  # 30 phút
                     update_coins_volume()
-                if current_time - _USDC_COINS_CACHE["last_price_update"] > 300:
+                if current_time - _USDC_COINS_CACHE["last_price_update"] > 60:  # 1 phút
                     update_coins_price()
 
                 if current_time - self.last_margin_safety_check > self.margin_safety_interval:
@@ -1339,6 +1475,7 @@ class BaseBot:
                     self.check_global_positions()
                     self.last_global_position_check = current_time
                 
+                # Nếu chưa có coin, tìm coin mới
                 if not self.active_symbols:
                     search_permission = self.bot_coordinator.request_coin_search(self.bot_id)
                     
@@ -1356,9 +1493,14 @@ class BaseBot:
                             )
                         
                         if found_coin:
-                            self.bot_coordinator.bot_has_coin(self.bot_id)
-                            self.log(f"✅ Đã tìm thấy coin: {found_coin}, đang chờ vào lệnh...")
-                            last_coin_search_log = 0  # Reset để log lần tiếp theo
+                            # FIXED: Thêm coin vào active_symbols ngay khi tìm thấy
+                            if self._add_symbol(found_coin):
+                                self.bot_coordinator.bot_has_coin(self.bot_id)
+                                self.log(f"✅ Đã tìm thấy và thêm coin: {found_coin}, đang chờ vào lệnh...")
+                                last_coin_search_log = 0  # Reset để log lần tiếp theo
+                            else:
+                                self.log(f"❌ Không thể thêm coin {found_coin}, tiếp tục tìm...")
+                                self.bot_coordinator.finish_coin_search(self.bot_id)
                         else:
                             self.bot_coordinator.finish_coin_search(self.bot_id)
                             # Chỉ log nếu đã qua interval
@@ -1379,6 +1521,7 @@ class BaseBot:
                     time.sleep(5)
                     continue  # Quay lại đầu vòng lặp
                 
+                # Xử lý các coin đang có
                 for symbol in self.active_symbols.copy():
                     position_opened = self._process_single_symbol(symbol)
                     
@@ -1423,7 +1566,7 @@ class BaseBot:
                     
                     # Luôn sử dụng cơ chế cân bằng
                     target_side = self.get_next_side_based_on_comprehensive_analysis()
-                    logger.info(f"🎯 Hướng giao dịch: {target_side}")
+                    logger.info(f"🎯 Hướng giao dịch cho {symbol}: {target_side}")
                     
                     if not self.coin_finder.has_existing_position(symbol):
                         if self._open_symbol_position(symbol, target_side):
@@ -1624,9 +1767,20 @@ class BaseBot:
             return False
 
     def _add_symbol(self, symbol):
+        """Thêm symbol vào danh sách hoạt động - FIXED"""
         if symbol in self.active_symbols or len(self.active_symbols) >= self.max_coins:
+            self.log(f"⚠️ {symbol} - Đã có trong active_symbols hoặc đạt giới hạn")
             return False
-        if self.coin_finder.has_existing_position(symbol): return False
+        
+        # Kiểm tra lại đòn bẩy trước khi thêm
+        actual_leverage = self.coin_finder.get_symbol_leverage(symbol)
+        if actual_leverage < self.lev:
+            self.log(f"❌ {symbol} - Đòn bẩy thực tế {actual_leverage}x < yêu cầu {self.lev}x")
+            return False
+        
+        if self.coin_finder.has_existing_position(symbol): 
+            self.log(f"⚠️ {symbol} - Đã có vị thế trên Binance")
+            return False
         
         self.symbol_data[symbol] = {
             'status': 'waiting', 'side': '', 'qty': 0, 'entry': 0, 'current_price': 0,
@@ -1638,16 +1792,22 @@ class BaseBot:
             'next_pyramiding_roi': self.pyramiding_x if self.pyramiding_enabled else 0,
             'last_pyramiding_time': 0,
             'pyramiding_base_roi': 0.0,
+            'added_time': time.time(),  # Thời gian thêm vào
+            'timeout': 60,  # Timeout 60 giây nếu chưa vào lệnh
         }
         
         self.active_symbols.append(symbol)
         self.coin_manager.register_coin(symbol)
         self.ws_manager.add_symbol(symbol, lambda price, sym=symbol: self._handle_price_update(price, sym))
         
+        # Kiểm tra vị thế hiện tại
         self._check_symbol_position(symbol)
         if self.symbol_data[symbol]['position_open']:
+            self.log(f"⚠️ {symbol} - Đã có vị thế mở, dừng theo dõi")
             self.stop_symbol(symbol)
             return False
+        
+        self.log(f"✅ Đã thêm {symbol} vào danh sách theo dõi, đang chờ cơ hội vào lệnh...")
         return True
 
     def _handle_price_update(self, price, symbol):
@@ -1717,17 +1877,10 @@ class BaseBot:
 
     def _open_symbol_position(self, symbol, side):
         try:
-            if self.coin_finder.has_existing_position(symbol):
-                self.log(f"⚠️ {symbol} - CÓ VỊ THẾ TRÊN BINANCE, BỎ QUA")
-                self.stop_symbol(symbol)
-                return False
-
-            self._check_symbol_position(symbol)
-            if self.symbol_data[symbol]['position_open']: return False
-
-            current_leverage = self.coin_finder.get_symbol_leverage(symbol)
-            if current_leverage < self.lev:
-                self.log(f"❌ {symbol} - Đòn bẩy không đủ: {current_leverage}x < {self.lev}x")
+            # Kiểm tra lại đòn bẩy trước khi vào lệnh
+            actual_leverage = self.coin_finder.get_symbol_leverage(symbol)
+            if actual_leverage < self.lev:
+                self.log(f"❌ {symbol} - Đòn bẩy không đủ: {actual_leverage}x < {self.lev}x")
                 self.stop_symbol(symbol)
                 return False
 
@@ -1811,7 +1964,7 @@ class BaseBot:
                     message = (f"✅ <b>ĐÃ MỞ VỊ THẾ {symbol}</b>\n"
                               f"🤖 Bot: {self.bot_id}\n📌 Hướng: {side}\n"
                               f"🏷️ Entry: {avg_price:.4f}\n📊 Khối lượng: {executed_qty:.4f}\n"
-                              f"💰 Đòn bẩy: {self.lev}x\n🎯 TP: {self.tp}% | 🛡️ SL: {self.sl}%")
+                              f"💰 Đòn bẩy: {self.lev}x | Thực tế: {actual_leverage}x\n🎯 TP: {self.tp}% | 🛡️ SL: {self.sl}%")
                     if self.roi_trigger: message += f" | 🎯 ROI Kích hoạt: {self.roi_trigger}%"
                     if self.pyramiding_enabled: message += f" | 🔄 Nhồi lệnh: {self.pyramiding_n} lần tại {self.pyramiding_x}%"
                     
@@ -2136,6 +2289,10 @@ class BotManager:
                 
                 logger.info(f"✅ Hệ thống đã khởi tạo cache {coins_count} coin")
                 
+                # Debug: log đòn bẩy của các coin
+                logger.info("📊 DEBUG SYSTEM - Kiểm tra đòn bẩy cache hệ thống:")
+                for i, coin in enumerate(cache_info.get("data", [])[:15]):
+                    logger.info(f"  {i+1}. {coin['symbol']} - Leverage: {coin['max_leverage']}x")
             else:
                 logger.error("❌ Hệ thống không thể khởi tạo cache")
                 
