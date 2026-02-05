@@ -44,16 +44,71 @@ _PRICE_CACHE_TTL = 300  # 5 phút
 
 # ========== CẤU HÌNH CÂN BẰNG LỆNH ==========
 _BALANCE_CONFIG = {
-    "buy_price_threshold": 1.0,  # Ngưỡng giá mua tối đa
-    "sell_price_threshold": 5.0,  # Ngưỡng giá bán tối thiểu
+    "buy_price_threshold": 10.0,  # Ngưỡng giá mua tối đa: 10 USDC (tăng từ 1.0)
+    "sell_price_threshold": 1.0,  # Ngưỡng giá bán tối thiểu: 1 USDC (giảm từ 5.0)
     "buy_volume_sort": "asc",  # Sắp xếp khối lượng mua: tăng dần
     "sell_volume_sort": "desc",  # Sắp xếp khối lượng bán: giảm dần
 }
 
+# ========== QUẢN LÝ HƯỚNG TOÀN CỤC ==========
+class GlobalSideCoordinator:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.last_global_check = 0
+        self.global_buy_count = 0
+        self.global_sell_count = 0
+        self.next_global_side = None
+        self.check_interval = 30
+    
+    def update_global_counts(self, api_key, api_secret):
+        """Cập nhật số lượng vị thế toàn cục từ Binance"""
+        with self._lock:
+            current_time = time.time()
+            if current_time - self.last_global_check < self.check_interval:
+                return self.next_global_side
+            
+            try:
+                positions = get_positions(api_key=api_key, api_secret=api_secret)
+                buy_count = 0
+                sell_count = 0
+                
+                for pos in positions:
+                    position_amt = float(pos.get('positionAmt', 0))
+                    if position_amt > 0:
+                        buy_count += 1
+                    elif position_amt < 0:
+                        sell_count += 1
+                
+                self.global_buy_count = buy_count
+                self.global_sell_count = sell_count
+                
+                # Quyết định hướng tiếp theo
+                if buy_count > sell_count:
+                    self.next_global_side = "SELL"
+                elif sell_count > buy_count:
+                    self.next_global_side = "BUY"
+                else:
+                    # Nếu bằng nhau, chọn ngẫu nhiên
+                    self.next_global_side = random.choice(["BUY", "SELL"])
+                
+                self.last_global_check = current_time
+                logger.info(f"🌍 Số lượng vị thế toàn cục: BUY={buy_count}, SELL={sell_count} → Ưu tiên: {self.next_global_side}")
+                
+                return self.next_global_side
+                
+            except Exception as e:
+                logger.error(f"❌ Lỗi cập nhật số lượng toàn cục: {str(e)}")
+                self.next_global_side = random.choice(["BUY", "SELL"])
+                return self.next_global_side
+    
+    def get_next_side(self, api_key, api_secret):
+        """Lấy hướng tiếp theo dựa trên phân tích toàn cục"""
+        return self.update_global_counts(api_key, api_secret)
+
 # ========== HÀM TIỆN ÍCH ==========
 def setup_logging():
     logging.basicConfig(
-        level=logging.WARNING,
+        level=logging.INFO,  # Thay đổi từ WARNING lên INFO để xem chi tiết
         format='%(asctime)s - %(levelname)s - %(module)s - %(message)s',
         handlers=[logging.StreamHandler(), logging.FileHandler('bot_errors.log')]
     )
@@ -374,13 +429,13 @@ def refresh_usdc_coins_cache():
                 continue
             
             max_leverage = 100
-            for f in symbol_info['filters']:
+            for f in symbol_info.get('filters', []):
                 if f['filterType'] == 'LEVERAGE' and 'maxLeverage' in f:
                     max_leverage = int(f['maxLeverage'])
                     break
             
             step_size = 0.001
-            for f in symbol_info['filters']:
+            for f in symbol_info.get('filters', []):
                 if f['filterType'] == 'LOT_SIZE':
                     step_size = float(f['stepSize'])
                     break
@@ -398,10 +453,19 @@ def refresh_usdc_coins_cache():
         _USDC_COINS_CACHE["data"] = usdc_coins
         _USDC_COINS_CACHE["last_volume_update"] = time.time()
         logger.info(f"✅ Đã cập nhật danh sách {len(usdc_coins)} coin USDC với đòn bẩy")
+        
+        # Log một số coin để debug
+        if usdc_coins:
+            sample = usdc_coins[:5]
+            for coin in sample:
+                logger.debug(f"  Coin mẫu: {coin['symbol']} - Leverage: {coin['max_leverage']}x")
+        
         return True
         
     except Exception as e:
         logger.error(f"❌ Lỗi refresh cache coin: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 def update_coins_price():
@@ -483,34 +547,47 @@ def get_usdc_coins_with_info():
 def filter_and_sort_coins_for_side(side, excluded_coins=None, required_leverage=10):
     """
     Lọc và sắp xếp coin theo hướng giao dịch
-    - BUY: Chọn coin giá < buy_threshold, sắp xếp volume tăng dần
-    - SELL: Chọn coin giá > sell_threshold, sắp xếp volume giảm dần
     """
     all_coins = get_usdc_coins_with_info()
     filtered_coins = []
+    
+    logger.info(f"🔍 Đang lọc coin cho hướng {side}. Tổng coin có sẵn: {len(all_coins)}")
+    logger.info(f"🔧 Cấu hình: MUA < {_BALANCE_CONFIG['buy_price_threshold']}USDC, BÁN > {_BALANCE_CONFIG['sell_price_threshold']}USDC, Leverage tối thiểu: {required_leverage}x")
     
     for coin in all_coins:
         if excluded_coins and coin['symbol'] in excluded_coins:
             continue
         if coin['max_leverage'] < required_leverage:
+            logger.debug(f"  {coin['symbol']}: Đòn bẩy {coin['max_leverage']}x < {required_leverage}x - LOẠI")
             continue
         if coin['price'] <= 0:
+            logger.debug(f"  {coin['symbol']}: Giá {coin['price']} - LOẠI")
             continue
         
         if side == "BUY":
             if coin['price'] >= _BALANCE_CONFIG["buy_price_threshold"]:
+                logger.debug(f"  {coin['symbol']}: Giá {coin['price']} >= {_BALANCE_CONFIG['buy_price_threshold']} - LOẠI")
                 continue
             filtered_coins.append(coin)
+            logger.debug(f"  {coin['symbol']}: Giá {coin['price']} - ĐẠT (BUY)")
             
         elif side == "SELL":
             if coin['price'] <= _BALANCE_CONFIG["sell_price_threshold"]:
+                logger.debug(f"  {coin['symbol']}: Giá {coin['price']} <= {_BALANCE_CONFIG['sell_price_threshold']} - LOẠI")
                 continue
             filtered_coins.append(coin)
+            logger.debug(f"  {coin['symbol']}: Giá {coin['price']} - ĐẠT (SELL)")
     
     if side == "BUY" and _BALANCE_CONFIG["buy_volume_sort"] == "asc":
         filtered_coins.sort(key=lambda x: x['volume'])
     elif side == "SELL" and _BALANCE_CONFIG["sell_volume_sort"] == "desc":
         filtered_coins.sort(key=lambda x: x['volume'], reverse=True)
+    
+    logger.info(f"✅ Đã lọc được {len(filtered_coins)} coin cho hướng {side}")
+    if filtered_coins:
+        top_coins = filtered_coins[:5]
+        for i, coin in enumerate(top_coins):
+            logger.info(f"  {i+1}. {coin['symbol']} - Giá: {coin['price']} USDC, Volume: {coin['volume']:.2f}, Leverage: {coin['max_leverage']}x")
     
     return filtered_coins
 
@@ -875,6 +952,10 @@ class SmartCoinFinder:
         self.cache_ttl = 30
         self.position_counts = {"BUY": 0, "SELL": 0}
         self.last_position_count_update = 0
+        self._bot_manager = None  # Sẽ được thiết lập bởi BotManager
+        
+    def set_bot_manager(self, bot_manager):
+        self._bot_manager = bot_manager
         
     def update_position_counts(self):
         """Cập nhật số lượng lệnh BUY/SELL hiện tại"""
@@ -931,8 +1012,6 @@ class SmartCoinFinder:
     def find_best_coin_with_balance(self, excluded_coins=None, required_leverage=10):
         """
         Tìm coin tốt nhất với cơ chế cân bằng lệnh
-        - Bỏ hoàn toàn tín hiệu RSI
-        - Chọn coin theo hướng chung của tài khoản
         """
         try:
             now = time.time()
@@ -941,39 +1020,55 @@ class SmartCoinFinder:
             
             self.last_scan_time = now
             
-            # Xác định hướng giao dịch dựa trên cân bằng
-            target_side = self.get_next_side_for_balance()
-            logger.info(f"🎯 Hướng ưu tiên theo cân bằng: {target_side}")
+            # Sử dụng cơ chế toàn cục thay vì mỗi bot tự check
+            if self._bot_manager and hasattr(self._bot_manager, 'global_side_coordinator'):
+                target_side = self._bot_manager.global_side_coordinator.get_next_side(
+                    self.api_key, self.api_secret
+                )
+            else:
+                # Fallback: tự check
+                target_side = self.get_next_side_for_balance()
             
-            # Lấy danh sách coin đã lọc và sắp xếp
+            logger.info(f"🎯 Hệ thống chọn hướng: {target_side}")
+            
+            # Lấy danh sách coin đã lọc
             filtered_coins = filter_and_sort_coins_for_side(
                 target_side, excluded_coins, required_leverage
             )
             
             if not filtered_coins:
                 logger.warning(f"⚠️ Không tìm thấy coin phù hợp cho hướng {target_side}")
+                logger.warning(f"   Nguyên nhân có thể do:")
+                logger.warning(f"   1. Ngưỡng giá quá khắt khe (MUA < {_BALANCE_CONFIG['buy_price_threshold']}USDC, BÁN > {_BALANCE_CONFIG['sell_price_threshold']}USDC)")
+                logger.warning(f"   2. Đòn bẩy yêu cầu {required_leverage}x quá cao")
+                logger.warning(f"   3. Tất cả coin đã có vị thế")
                 return None
             
-            # Duyệt qua danh sách đã sắp xếp - KHÔNG KIỂM TRA TÍN HIỆU RSI
-            for coin in filtered_coins:
+            # Ưu tiên coin có giá hợp lý
+            for coin in filtered_coins[:20]:  # Chỉ xem xét top 20
                 symbol = coin['symbol']
                 
                 # Kiểm tra vị thế tồn tại
                 if self.has_existing_position(symbol):
+                    logger.debug(f"  {symbol}: Đã có vị thế - Bỏ qua")
                     continue
                 
-                # ✅ KHÔNG KIỂM TRA TÍN HIỆU RSI - VÀO LỆNH NGAY
-                logger.info(f"✅ Tìm thấy coin {symbol} phù hợp ({target_side}) - KHÔNG DÙNG TÍN HIỆU RSI")
-                return symbol
+                # Kiểm tra xem coin có đang bị bot khác quản lý không
+                if self._bot_manager:
+                    if self._bot_manager.coin_manager.is_coin_active(symbol):
+                        logger.debug(f"  {symbol}: Đang được bot khác quản lý - Bỏ qua")
+                        continue
                 
-                # Thêm delay nhỏ để tránh rate limit
-                time.sleep(0.5)
+                logger.info(f"✅ Tìm thấy coin {symbol} phù hợp ({target_side})")
+                return symbol
             
-            logger.warning("⚠️ Không tìm thấy coin chưa có vị thế phù hợp")
+            logger.warning(f"⚠️ Đã duyệt {len(filtered_coins)} coin nhưng không có coin nào chưa có vị thế")
             return None
             
         except Exception as e:
             logger.error(f"❌ Lỗi tìm coin với cân bằng: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
 class WebSocketManager:
@@ -1125,8 +1220,8 @@ class BaseBot:
         # Thêm cấu hình cân bằng lệnh
         self.enable_balance_orders = kwargs.get('enable_balance_orders', False)
         self.balance_config = {
-            'buy_price_threshold': kwargs.get('buy_price_threshold', 1.0),
-            'sell_price_threshold': kwargs.get('sell_price_threshold', 5.0),
+            'buy_price_threshold': kwargs.get('buy_price_threshold', 10.0),
+            'sell_price_threshold': kwargs.get('sell_price_threshold', 1.0),
             'buy_volume_sort': kwargs.get('buy_volume_sort', 'asc'),
             'sell_volume_sort': kwargs.get('sell_volume_sort', 'desc'),
         }
@@ -1280,7 +1375,7 @@ class BaseBot:
                                 return True
                     else:
                         # Giữ nguyên logic cũ cho các trường hợp khác
-                        entry_signal = self.coin_finder.get_entry_signal(symbol)
+                        entry_signal = self.coin_finder.get_entry_signal(symbol) if hasattr(self.coin_finder, 'get_entry_signal') else None
                         
                         if entry_signal:
                             if self.trading_type == "price_based":
@@ -1480,7 +1575,7 @@ class BaseBot:
             current_roi = (profit / invested) * 100
             
             if current_roi >= self.roi_trigger:
-                exit_signal = self.coin_finder.get_exit_signal(symbol)
+                exit_signal = self.coin_finder.get_exit_signal(symbol) if hasattr(self.coin_finder, 'get_exit_signal') else None
                 if exit_signal:
                     reason = f"🎯 Đạt ROI {self.roi_trigger}% + Tín hiệu thoát (ROI: {current_roi:.2f}%)"
                     self._close_symbol_position(symbol, reason)
@@ -1991,6 +2086,7 @@ class BotManager:
         self.bot_coordinator = BotExecutionCoordinator()
         self.coin_manager = CoinManager()
         self.symbol_locks = defaultdict(threading.Lock)
+        self.global_side_coordinator = GlobalSideCoordinator()  # Thêm cơ chế toàn cục
 
         if api_key and api_secret:
             self._verify_api_connection()
@@ -2200,7 +2296,7 @@ class BotManager:
             "• Đếm số lượng lệnh BUY/SELL hiện có\n"
             "• Nhiều lệnh BUY hơn → ưu tiên tìm lệnh SELL\n"
             "• Nhiều lệnh SELL hơn → ưu tiên tìm lệnh BUY\n"
-            "• Lọc coin theo ngưỡng giá (mua <1USDC, bán >5USDC)\n"
+            "• Lọc coin theo ngưỡng giá (mua <10USDC, bán >1USDC)\n"
             "• Sắp xếp volume (mua: tăng dần, bán: giảm dần)\n\n"
             
             "🚫 <b>TỰ ĐỘNG LOẠI TRỪ:</b>\n"
@@ -2230,8 +2326,8 @@ class BotManager:
         trading_type = kwargs.get('trading_type', 'basic')
         
         enable_balance_orders = kwargs.get('enable_balance_orders', False)
-        buy_price_threshold = kwargs.get('buy_price_threshold', 1.0)
-        sell_price_threshold = kwargs.get('sell_price_threshold', 5.0)
+        buy_price_threshold = kwargs.get('buy_price_threshold', 10.0)
+        sell_price_threshold = kwargs.get('sell_price_threshold', 1.0)
         buy_volume_sort = kwargs.get('buy_volume_sort', 'asc')
         sell_volume_sort = kwargs.get('sell_volume_sort', 'desc')
         
@@ -2263,6 +2359,7 @@ class BotManager:
                 )
                 
                 bot._bot_manager = self
+                bot.coin_finder.set_bot_manager(self)  # Thiết lập bot_manager cho coin_finder
                 self.bots[bot_id] = bot
                 created_count += 1
                 
@@ -2571,8 +2668,8 @@ class BotManager:
                 for bot in self.bots.values():
                     if hasattr(bot, 'enable_balance_orders') and bot.enable_balance_orders:
                         bot.balance_config = {
-                            'buy_price_threshold': user_state.get('buy_price_threshold', 1.0),
-                            'sell_price_threshold': user_state.get('sell_price_threshold', 5.0),
+                            'buy_price_threshold': user_state.get('buy_price_threshold', 10.0),
+                            'sell_price_threshold': user_state.get('sell_price_threshold', 1.0),
                             'buy_volume_sort': user_state.get('buy_volume_sort', 'asc'),
                             'sell_volume_sort': user_state.get('sell_volume_sort', 'desc'),
                         }
@@ -2580,8 +2677,8 @@ class BotManager:
                 
                 config_summary = (
                     f"✅ <b>ĐÃ CẬP NHẬT CẤU HÌNH CÂN BẰNG</b>\n\n"
-                    f"• Ngưỡng MUA: < {user_state.get('buy_price_threshold', 1.0)} USDC\n"
-                    f"• Ngưỡng BÁN: > {user_state.get('sell_price_threshold', 5.0)} USDC\n"
+                    f"• Ngưỡng MUA: < {user_state.get('buy_price_threshold', 10.0)} USDC\n"
+                    f"• Ngưỡng BÁN: > {user_state.get('sell_price_threshold', 1.0)} USDC\n"
                     f"• Sắp xếp MUA: {user_state.get('buy_volume_sort', 'asc')}\n"
                     f"• Sắp xếp BÁN: {user_state.get('sell_volume_sort', 'desc')}\n\n"
                     f"🔄 Đã cập nhật cho {updated_bots} bot có cân bằng lệnh"
@@ -3022,7 +3119,7 @@ class BotManager:
                 "• Đếm số lượng lệnh BUY/SELL hiện có\n"
                 "• Nhiều lệnh BUY hơn → ưu tiên tìm lệnh SELL\n"
                 "• Nhiều lệnh SELL hơn → ưu tiên tìm lệnh BUY\n"
-                "• Lọc coin theo ngưỡng giá (mua <1USDC, bán >5USDC)\n"
+                "• Lọc coin theo ngưỡng giá (mua <10USDC, bán >1USDC)\n"
                 "• Sắp xếp volume (mua: tăng dần, bán: giảm dần)\n\n"
                 
                 "🎯 <b>ĐIỀU KIỆN THOÁT LỆNH:</b>\n"
@@ -3167,5 +3264,40 @@ class BotManager:
             send_telegram(f"❌ Lỗi tạo bot: {str(e)}", chat_id=chat_id, reply_markup=create_main_menu(),
                         bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
             self.user_states[chat_id] = {}
+
+# ========== TEST HỆ THỐNG ==========
+if __name__ == "__main__":
+    logger.info("🧪 Đang test lấy danh sách coin...")
+    
+    # Test refresh cache
+    if refresh_usdc_coins_cache():
+        logger.info("✅ Cache coin đã được làm mới")
+        
+        # Test update giá và volume
+        update_coins_price()
+        update_coins_volume()
+        
+        # Test lấy coin
+        coins = get_usdc_coins_with_info()
+        logger.info(f"📊 Tổng số coin: {len(coins)}")
+        
+        # Test filter cho BUY và SELL
+        buy_coins = filter_and_sort_coins_for_side("BUY", required_leverage=10)
+        sell_coins = filter_and_sort_coins_for_side("SELL", required_leverage=10)
+        
+        logger.info(f"🛒 Coin cho BUY: {len(buy_coins)}")
+        logger.info(f"🏪 Coin cho SELL: {len(sell_coins)}")
+        
+        if buy_coins:
+            logger.info("Top 5 coin cho BUY:")
+            for i, coin in enumerate(buy_coins[:5]):
+                logger.info(f"  {i+1}. {coin['symbol']} - Giá: {coin['price']} USDC")
+        
+        if sell_coins:
+            logger.info("Top 5 coin cho SELL:")
+            for i, coin in enumerate(sell_coins[:5]):
+                logger.info(f"  {i+1}. {coin['symbol']} - Giá: {coin['price']} USDC")
+    else:
+        logger.error("❌ Không thể refresh cache coin")
 
 ssl._create_default_https_context = ssl._create_unverified_context
