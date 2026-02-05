@@ -544,7 +544,7 @@ def get_max_leverage_from_cache(symbol):
     
     # Nếu không tìm thấy trong cache, trả về giá trị mặc định an toàn
     logger.warning(f"⚠️ Không tìm thấy {symbol} trong cache, sử dụng đòn bẩy mặc định 100x")
-    return 100
+    return 50
 
 # ========== HÀM LỌC COIN CẢI THIỆN ==========
 def filter_and_sort_coins_for_side(side, excluded_coins=None, required_leverage=10):
