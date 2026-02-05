@@ -417,7 +417,6 @@ def refresh_usdc_coins_cache():
             if symbol in _SYMBOL_BLACKLIST:
                 continue
             
-            max_leverage = 100
             for f in symbol_info.get('filters', []):
                 if f['filterType'] == 'LEVERAGE' and 'maxLeverage' in f:
                     max_leverage = int(f['maxLeverage'])
@@ -445,7 +444,7 @@ def refresh_usdc_coins_cache():
         
         # Log một số coin để debug
         if usdc_coins:
-            sample = usdc_coins[:5]
+            sample = usdc_coins[:10]
             for coin in sample:
                 logger.debug(f"  Coin mẫu: {coin['symbol']} - Leverage: {coin['max_leverage']}x")
         
