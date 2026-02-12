@@ -1040,6 +1040,10 @@ class BaseBot:
                  coin_manager=None, symbol_locks=None, max_coins=1, bot_coordinator=None,
                  pyramiding_n=0, pyramiding_x=0, **kwargs):
 
+        # ===== FIX: global must be at the very top =====
+        global _BALANCE_CONFIG
+        # ================================================
+
         self.max_coins = 1
         self.active_symbols = []
         self.symbol_data = {}
@@ -1106,7 +1110,6 @@ class BaseBot:
             'sell_price_threshold': kwargs.get('sell_price_threshold', 10.0),
             'min_leverage': _BALANCE_CONFIG["min_leverage"]
         }
-        global _BALANCE_CONFIG
         _BALANCE_CONFIG.update(self.balance_config)
 
         if symbol and not self.coin_finder.has_existing_position(symbol):
