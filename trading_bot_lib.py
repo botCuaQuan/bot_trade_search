@@ -1,4 +1,12 @@
 # trading_bot_lib_ep_huong_chung.py (HOÀN CHỈNH - CHIẾN LƯỢC CÂN BẰNG + USDT/USDC)
+# ======================================================
+#   SỬA LỚN: 
+#   1. BỎ HOÀN TOÀN VIỆC LỌC & SẮP XẾP THEO VOLUME 
+#   2. CHỈ KIỂM TRA GIÁ + ĐÒN BẨY + BLACKLIST + VỊ THẾ
+#   3. QUEUE TÌM COIN ĐÃ HOẠT ĐỘNG TỐT (FIFO)
+#   4. GIỮ NGUYÊN CÁC TÍNH NĂNG CÂN BẰNG LỆNH, PYRAMIDING, ROI TRIGGER
+# ======================================================
+
 import json
 import hmac
 import hashlib
@@ -34,16 +42,16 @@ _COINS_CACHE = {
     "last_volume_update": 0,
     "last_price_update": 0,
 }
-_VOLUME_CACHE_TTL = 6 * 3600  # 6 giờ
+_VOLUME_CACHE_TTL = 6 * 3600  # 6 giờ (vẫn lưu để hiển thị, không dùng để lọc)
 _PRICE_CACHE_TTL = 300        # 5 phút
 
-# ========== CẤU HÌNH CÂN BẰNG LỆNH (MỚI) ==========
+# ========== CẤU HÌNH CÂN BẰNG LỆNH ==========
 _BALANCE_CONFIG = {
     "buy_price_threshold": 1.0,
     "sell_price_threshold": 10.0,
 }
 
-# ========== QUẢN LÝ HƯỚNG TOÀN CỤC ==========
+# ========== QUẢN LÝ HƯỚNG TOÀN CẦU ==========
 class GlobalSideCoordinator:
     def __init__(self):
         self._lock = threading.Lock()
@@ -167,8 +175,8 @@ def create_bot_mode_keyboard():
 def create_symbols_keyboard():
     try:
         coins = get_coins_with_info()
-        coins_sorted = sorted(coins, key=lambda x: x['volume'], reverse=True)
-        symbols = [coin['symbol'] for coin in coins_sorted[:12]]
+        # Không dùng volume để sắp xếp, lấy top 12 coin bất kỳ trong cache (có thể random hoặc theo tên)
+        symbols = [coin['symbol'] for coin in coins[:12]]
         if not symbols:
             symbols = ["BNBUSDT", "ADAUSDT", "DOGEUSDT", "XRPUSDT", "DOTUSDT", "LINKUSDT", "SOLUSDT", "MATICUSDT"]
     except:
@@ -437,7 +445,7 @@ def update_coins_price():
         return False
 
 def update_coins_volume():
-    """Cập nhật volume cho tất cả coin trong cache"""
+    """Cập nhật volume cho tất cả coin trong cache (chỉ để tham khảo)"""
     global _COINS_CACHE
     try:
         url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
@@ -494,12 +502,14 @@ def force_refresh_coin_cache():
         return True
     return False
 
-# ========== HÀM LỌC COIN (USDT + USDC) ==========
-def filter_and_sort_coins_for_side(side, excluded_coins=None, required_leverage=10):
+# ========== HÀM LỌC COIN (USDT + USDC) - CHỈ GIÁ & ĐÒN BẨY ==========
+def filter_coins_for_side(side, excluded_coins=None, required_leverage=10):
     """
-    Lọc coin theo chiến lược:
-    - BUY  : price < buy_price_threshold, volume giảm dần
-    - SELL : price > sell_price_threshold, volume giảm dần
+    Lọc coin theo chiến lược CÂN BẰNG:
+    - BUY  : price < buy_price_threshold
+    - SELL : price > sell_price_threshold
+    - KHÔNG lọc theo volume, KHÔNG sắp xếp (chọn ngẫu nhiên trong danh sách)
+    - Chỉ kiểm tra: không blacklist, không bị exclude, đủ đòn bẩy, giá > 0, đúng ngưỡng
     """
     all_coins = get_coins_with_info()
     filtered = []
@@ -509,14 +519,13 @@ def filter_and_sort_coins_for_side(side, excluded_coins=None, required_leverage=
         return filtered
 
     logger.info(f"🔍 Lọc coin {side} | {len(all_coins)} coin trong cache")
-    logger.info(f"⚙️ Ngưỡng: MUA < {_BALANCE_CONFIG['buy_price_threshold']} USDT/USDC, BÁN > {_BALANCE_CONFIG['sell_price_threshold']} USDT/USDC | Volume: DESC")
+    logger.info(f"⚙️ Ngưỡng: MUA < {_BALANCE_CONFIG['buy_price_threshold']} USDT/USDC, BÁN > {_BALANCE_CONFIG['sell_price_threshold']} USDT/USDC | KHÔNG dùng volume")
 
     excluded_set = set(excluded_coins or [])
     blacklisted = 0
     excluded_cnt = 0
     lev_fail = 0
     price_fail = 0
-    volume_zero = 0
 
     for coin in all_coins:
         sym = coin['symbol']
@@ -532,9 +541,6 @@ def filter_and_sort_coins_for_side(side, excluded_coins=None, required_leverage=
         if coin['price'] <= 0:
             price_fail += 1
             continue
-        if coin['volume'] <= 0:
-            volume_zero += 1
-            continue
 
         if side == "BUY" and coin['price'] >= _BALANCE_CONFIG["buy_price_threshold"]:
             price_fail += 1
@@ -545,12 +551,14 @@ def filter_and_sort_coins_for_side(side, excluded_coins=None, required_leverage=
 
         filtered.append(coin)
 
-    filtered.sort(key=lambda x: x['volume'], reverse=True)
+    # KHÔNG sắp xếp theo volume nữa
+    # filtered.sort(key=lambda x: x['volume'], reverse=True)
 
-    logger.info(f"📊 {side}: {len(filtered)} coin phù hợp (loại: blacklist={blacklisted}, excluded={excluded_cnt}, lev={lev_fail}, giá={price_fail}, volume0={volume_zero})")
+    logger.info(f"📊 {side}: {len(filtered)} coin phù hợp (loại: blacklist={blacklisted}, excluded={excluded_cnt}, lev={lev_fail}, giá={price_fail})")
     if filtered:
+        # Log 5 coin đầu tiên (theo thứ tự cache)
         for i, c in enumerate(filtered[:5]):
-            logger.info(f"  {i+1}. {c['symbol']} | giá: {c['price']:.4f} | vol: {c['volume']:.1f} | lev: {c['max_leverage']}x")
+            logger.info(f"  {i+1}. {c['symbol']} | giá: {c['price']:.4f} | lev: {c['max_leverage']}x")
 
     return filtered
 
@@ -898,9 +906,8 @@ class SmartCoinFinder:
     def find_best_coin_with_balance(self, excluded_coins=None, required_leverage=10):
         """
         Tìm coin tốt nhất với cơ chế cân bằng lệnh
-        - Đếm số lệnh BUY/SELL hiện có
-        - Nhiều BUY hơn → tìm SELL, nhiều SELL hơn → tìm BUY
-        - Lọc coin theo ngưỡng giá và volume giảm dần
+        - Chỉ dựa trên: hướng, ngưỡng giá, đòn bẩy
+        - KHÔNG dùng volume, KHÔNG sắp xếp
         """
         try:
             now = time.time()
@@ -923,7 +930,8 @@ class SmartCoinFinder:
 
             logger.info(f"🎯 Hệ thống chọn hướng: {target_side}")
 
-            filtered_coins = filter_and_sort_coins_for_side(
+            # Lọc coin theo hướng, chỉ kiểm tra giá & đòn bẩy
+            filtered_coins = filter_coins_for_side(
                 target_side, excluded_coins, required_leverage
             )
 
@@ -933,7 +941,8 @@ class SmartCoinFinder:
                     self.last_failed_search_log = now
                 return None
 
-            for coin in filtered_coins[:20]:
+            # Chọn coin đầu tiên trong danh sách (thứ tự cache) không có vị thế, không active
+            for coin in filtered_coins:
                 symbol = coin['symbol']
                 if self.has_existing_position(symbol):
                     continue
@@ -942,7 +951,7 @@ class SmartCoinFinder:
                 logger.info(f"✅ Tìm thấy coin {symbol} phù hợp ({target_side})")
                 return symbol
 
-            logger.warning(f"⚠️ Đã duyệt {len(filtered_coins)} coin nhưng không có coin nào chưa có vị thế")
+            logger.warning(f"⚠️ Đã duyệt {len(filtered_coins)} coin nhưng không có coin nào chưa có vị thế/active")
             return None
 
         except Exception as e:
@@ -1921,10 +1930,11 @@ class BotManager:
             "• Nhiều lệnh SELL hơn → tìm lệnh BUY\n"
             "• Bằng nhau → chọn ngẫu nhiên\n\n"
             "📊 <b>LỰA CHỌN COIN:</b>\n"
-            "• MUA: chọn coin có giá < 1 USDT/USDC, volume cao nhất đầu tiên\n"
-            "• BÁN: chọn coin có giá > 10 USDT/USDC, volume cao nhất đầu tiên\n"
+            "• MUA: chọn coin có giá < 1 USDT/USDC (có thể cấu hình)\n"
+            "• BÁN: chọn coin có giá > 10 USDT/USDC (có thể cấu hình)\n"
             "• Loại trừ coin đã có vị thế để tránh trùng\n"
-            "• Loại trừ BTCUSDT, ETHUSDT, BTCUSDC, ETHUSDC\n\n"
+            "• Loại trừ BTCUSDT, ETHUSDT, BTCUSDC, ETHUSDC\n"
+            "• <b>KHÔNG dùng volume, không sắp xếp</b>\n\n"
             "🔄 <b>NHỒI LỆNH (PYRAMIDING):</b>\n"
             "• Nhồi lệnh cùng chiều khi đạt mốc ROI\n"
             "• Số lần nhồi và mốc ROI tùy chỉnh\n"
@@ -1993,8 +2003,9 @@ class BotManager:
             balance_info = ""
             if enable_balance_orders:
                 balance_info = (f"\n⚖️ <b>CÂN BẰNG LỆNH: BẬT</b>\n"
-                                f"• Mua: giá < {buy_price_threshold} USDT/USDC | Volume: cao nhất đầu\n"
-                                f"• Bán: giá > {sell_price_threshold} USDT/USDC | Volume: cao nhất đầu\n")
+                                f"• Mua: giá < {buy_price_threshold} USDT/USDC\n"
+                                f"• Bán: giá > {sell_price_threshold} USDT/USDC\n"
+                                f"• KHÔNG dùng volume để sắp xếp\n")
 
             success_msg = (f"✅ <b>ĐÃ TẠO {created_count} BOT CÂN BẰNG</b>\n\n"
                            f"🎯 Chiến lược: {strategy_type}\n💰 Đòn bẩy: {lev}x\n"
@@ -2010,13 +2021,13 @@ class BotManager:
                            f"• Đếm số lượng lệnh BUY/SELL hiện có\n"
                            f"• Ưu tiên hướng ngược lại khi mất cân bằng\n"
                            f"• Lọc coin theo ngưỡng giá (MUA <{buy_price_threshold}, BÁN >{sell_price_threshold})\n"
-                           f"• Sắp xếp volume giảm dần cho cả hai chiều\n\n")
+                           f"• KHÔNG dùng volume - chọn coin đầu tiên trong cache phù hợp\n\n")
             if pyramiding_n > 0:
                 success_msg += (f"🔄 <b>NHỒI LỆNH ĐƯỢC KÍCH HOẠT</b>\n"
                                f"• Nhồi {pyramiding_n} lần khi đạt mỗi mốc {pyramiding_x}% ROI\n"
                                f"• Mỗi lần nhồi dùng {percent}% vốn ban đầu\n"
                                f"• Tự động cập nhật giá trung bình\n\n")
-            success_msg += f"⚡ <b>MỖI BOT CHẠY TRONG LUỒNG RIÊNG BIỆT</b>"
+            success_msg += f"⚡ <b>MỖI BOT CHẠY TRONG LUỒNG RIÊNG BIỆT - QUEUE FIFO</b>"
             self.log(success_msg)
             return True
         else:
@@ -2192,7 +2203,6 @@ class BotManager:
                          bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
 
         elif text == "⚙️ Cấu hình":
-            # Có thể mở rộng thêm
             send_telegram("⚙️ Tính năng đang phát triển.", chat_id=chat_id,
                          bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
 
@@ -2448,7 +2458,6 @@ class BotManager:
 
         elif current_step == 'waiting_balance_config':
             if text == '⚖️ Bật cân bằng lệnh':
-                # Cập nhật tất cả bot đang chạy
                 updated = 0
                 for bot in self.bots.values():
                     if hasattr(bot, 'enable_balance_orders'):
@@ -2473,7 +2482,7 @@ class BotManager:
                     f"⚖️ <b>CẤU HÌNH CÂN BẰNG HIỆN TẠI</b>\n\n"
                     f"• Ngưỡng giá MUA: < {_BALANCE_CONFIG['buy_price_threshold']} USDT/USDC\n"
                     f"• Ngưỡng giá BÁN: > {_BALANCE_CONFIG['sell_price_threshold']} USDT/USDC\n"
-                    f"• Sắp xếp: Volume giảm dần cho cả hai chiều\n\n"
+                    f"• Sắp xếp: <b>KHÔNG dùng volume</b> – chọn coin đầu tiên phù hợp\n\n"
                     f"🔄 <b>CACHE HỆ THỐNG</b>\n"
                     f"• Số coin: {len(_COINS_CACHE.get('data', []))}\n"
                     f"• Cập nhật giá: {time.ctime(_COINS_CACHE.get('last_price_update', 0))}\n"
@@ -2536,13 +2545,13 @@ class BotManager:
                               f"• Đếm số lượng lệnh BUY/SELL hiện có\n"
                               f"• Ưu tiên hướng ngược lại khi mất cân bằng\n"
                               f"• Lọc coin theo ngưỡng giá (MUA <{buy_price_threshold}, BÁN >{sell_price_threshold})\n"
-                              f"• Sắp xếp volume giảm dần cho cả hai chiều\n\n")
+                              f"• <b>KHÔNG dùng volume – chọn coin đầu tiên trong cache phù hợp</b>\n\n")
                 if pyramiding_n > 0:
                     success_msg += (f"🔄 <b>NHỒI LỆNH ĐƯỢC KÍCH HOẠT</b>\n"
                                   f"• Nhồi {pyramiding_n} lần khi đạt mỗi mốc {pyramiding_x}% ROI\n"
                                   f"• Mỗi lần nhồi dùng {percent}% vốn ban đầu\n"
                                   f"• Tự động cập nhật giá trung bình\n\n")
-                success_msg += f"⚡ <b>MỖI BOT CHẠY TRONG LUỒNG RIÊNG BIỆT</b>"
+                success_msg += f"⚡ <b>MỖI BOT CHẠY TRONG LUỒNG RIÊNG BIỆT - QUEUE FIFO</b>"
 
                 send_telegram(success_msg, chat_id=chat_id, reply_markup=create_main_menu(),
                             bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
