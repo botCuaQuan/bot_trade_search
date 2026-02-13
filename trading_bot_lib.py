@@ -605,8 +605,8 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
     - BUY  : price < buy_price_threshold
     - SELL : price > sell_price_threshold
     - Đòn bẩy tối thiểu: min_leverage (nếu None thì lấy từ _BALANCE_CONFIG)
-    - SẮP XẾP theo khối lượng giao dịch GIẢM DẦN (ưu tiên thanh khoản cao)
-    - LOẠI BỎ coin có giá <= 0, nhưng giữ coin volume 0 (xếp cuối).
+    - KHÔNG SẮP XẾP – giữ nguyên thứ tự từ cache (theo danh sách Binance)
+    - LOẠI BỎ coin có giá <= 0, nhưng giữ coin volume 0.
     """
     all_coins = get_coins_with_info()
     filtered = []
@@ -623,7 +623,7 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
 
     logger.info(f"🔍 Lọc coin {side} | {len(all_coins)} coin trong cache")
     logger.info(f"⚙️ Ngưỡng: MUA < {buy_threshold} USDT/USDC, BÁN > {sell_threshold} USDT/USDC | Đòn bẩy tối thiểu: {min_leverage}x")
-    logger.info(f"📊 SẮP XẾP: Theo khối lượng giảm dần (BẬT)")
+    logger.info(f"📊 SẮP XẾP: Theo thứ tự từ Binance (không can thiệp)")
 
     excluded_set = set(excluded_coins or [])
     blacklisted = 0
@@ -648,7 +648,7 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
             price_zero += 1
             continue  # LOẠI BỎ HOÀN TOÀN
         if coin['volume'] <= 0:
-            volume_zero += 1   # vẫn giữ coin volume 0, nhưng xếp cuối
+            volume_zero += 1   # vẫn giữ coin volume 0
 
         if side == "BUY" and coin['price'] >= buy_threshold:
             price_fail += 1
@@ -659,7 +659,7 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
 
         filtered.append(coin)
 
-    filtered.sort(key=lambda x: x['volume'], reverse=True)
+    # ❌ ĐÃ XÓA DÒNG SORT: filtered.sort(key=lambda x: x['volume'], reverse=True)
 
     logger.info(f"📊 {side}: {len(filtered)} coin phù hợp (loại: blacklist={blacklisted}, excluded={excluded_cnt}, lev={lev_fail}, giá={price_fail}, volume0={volume_zero}, price0={price_zero})")
     if filtered:
@@ -667,7 +667,6 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
             logger.info(f"  {i+1}. {c['symbol']} | giá: {c['price']:.4f} | volume: {c['volume']:.2f} | lev: {c['max_leverage']}x")
 
     return filtered
-
 def update_balance_config(buy_price_threshold=None, sell_price_threshold=None, min_leverage=None, sort_by_volume=None):
     """Cập nhật cấu hình cân bằng lệnh"""
     _BALANCE_CONFIG.update(
