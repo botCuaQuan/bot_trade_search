@@ -1,4 +1,4 @@
-# trading_bot_lib_final_fixed.py (HOÀN CHỈNH - ĐÃ SỬA LỖI LEVERAGE & RACE CONDITION)
+# trading_bot_lib_final_fixed.py (HOÀN CHỈNH - ĐÃ SỬA LỖI LEVERAGE & RACE CONDITION & BLACKLIST TẠM)
 # =============================================================================
 #  TÍNH NĂNG NỔI BẬT:
 #  1. Cache coin tập trung, thread‑safe, tự động làm mới trong BotManager.
@@ -20,6 +20,7 @@
 # 17. FIX: Race condition – thêm symbol lock khi mở/đóng vị thế.
 # 18. FIX: Dùng available_balance thay total_balance để tránh vượt ký quỹ.
 # 19. FIX: Tăng scan_cooldown lên 30 giây giảm tải hệ thống.
+# 20. FIX: Thêm blacklist tạm thời cho coin bị lỗi, tránh lặp lại ngay.
 # =============================================================================
 
 import json
@@ -923,6 +924,33 @@ class BotExecutionCoordinator:
         self._current_finding_bot = None
         self._found_coins = set()
         self._bots_with_coins = set()
+        # FIXED: Thêm blacklist tạm thời
+        self._temp_blacklist = {}          # symbol -> expiry timestamp
+        self._blacklist_lock = threading.RLock()
+
+    # FIXED: Phương thức quản lý blacklist tạm
+    def add_temp_blacklist(self, symbol, duration=300):
+        """Đưa coin vào blacklist tạm thời trong `duration` giây (mặc định 5 phút)."""
+        expiry = time.time() + duration
+        with self._blacklist_lock:
+            self._temp_blacklist[symbol.upper()] = expiry
+        logger.info(f"⏳ Blacklist tạm: {symbol} trong {duration}s")
+
+    def is_temp_blacklisted(self, symbol):
+        """Kiểm tra coin có đang bị blacklist tạm không (tự động dọn dẹp hết hạn)."""
+        symbol = symbol.upper()
+        now = time.time()
+        with self._blacklist_lock:
+            # Xoá các mục hết hạn
+            expired = [s for s, exp in self._temp_blacklist.items() if exp <= now]
+            for s in expired:
+                del self._temp_blacklist[s]
+            return symbol in self._temp_blacklist
+
+    def release_coin(self, symbol):
+        """Xoá coin khỏi danh sách `_found_coins` (giải phóng để bot khác dùng)."""
+        with self._lock:
+            self._found_coins.discard(symbol.upper())
 
     def request_coin_search(self, bot_id):
         with self._lock:
@@ -1102,8 +1130,11 @@ class SmartCoinFinder:
                     self.last_failed_search_log = now
                 return None
 
+            # FIXED: Lọc bỏ coin đang trong blacklist tạm thời
             for coin in filtered_coins:
                 symbol = coin['symbol']
+                if self._bot_manager and self._bot_manager.bot_coordinator.is_temp_blacklisted(symbol):
+                    continue
                 if self.has_existing_position(symbol):
                     continue
                 if self._bot_manager and self._bot_manager.coin_manager.is_coin_active(symbol):
@@ -1493,7 +1524,7 @@ class BaseBot:
                 # Kiểm tra lại vị thế sau khi lock (phòng trường hợp bot khác vừa mở)
                 if self.coin_finder.has_existing_position(symbol):
                     self.log(f"⚠️ {symbol} - CÓ VỊ THẾ TRÊN BINANCE (phát hiện sau lock), BỎ QUA")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)  # FIXED: thất bại nên đưa vào blacklist
                     return False
 
                 self._check_symbol_position(symbol)
@@ -1503,27 +1534,27 @@ class BaseBot:
                 # FIXED: Không so sánh với max_leverage từ cache, thử set leverage trực tiếp
                 if not set_leverage(symbol, self.lev, self.api_key, self.api_secret):
                     self.log(f"❌ {symbol} - Không thể cài đặt đòn bẩy {self.lev}x (Binance từ chối)")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
                 # Lấy số dư khả dụng (FIXED: dùng available_balance)
                 total_balance, available_balance = get_total_and_available_balance(self.api_key, self.api_secret)
                 if available_balance is None or available_balance <= 0:
                     self.log(f"❌ {symbol} - Không đủ số dư khả dụng")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
                 # Tính vốn dựa trên available_balance (FIXED)
                 required_usd = available_balance * (self.percent / 100)
                 if required_usd <= 0:
                     self.log(f"❌ {symbol} - Số dư khả dụng quá nhỏ ({available_balance:.2f})")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
                 current_price = self.get_current_price(symbol)
                 if current_price <= 0:
                     self.log(f"❌ {symbol} - Lỗi giá")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
                 step_size = get_step_size(symbol)
@@ -1538,18 +1569,18 @@ class BaseBot:
 
                 if qty < min_qty:
                     self.log(f"❌ {symbol} - Khối lượng {qty} nhỏ hơn minQty {min_qty}")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
                 notional_value = qty * current_price
                 if notional_value < min_notional:
                     self.log(f"❌ {symbol} - Giá trị danh nghĩa {notional_value:.2f} < {min_notional} (minNotional)")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
                 if qty <= 0:
                     self.log(f"❌ {symbol} - Khối lượng không hợp lệ")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
                 cancel_all_orders(symbol, self.api_key, self.api_secret)
@@ -1565,7 +1596,7 @@ class BaseBot:
 
                     if executed_qty <= 0:
                         self.log(f"❌ {symbol} - Lệnh không khớp")
-                        self.stop_symbol(symbol)
+                        self.stop_symbol(symbol, failed=True)
                         return False
 
                     time.sleep(1)
@@ -1574,7 +1605,7 @@ class BaseBot:
 
                     if not self.symbol_data[symbol]['position_open']:
                         self.log(f"❌ {symbol} - Lệnh đã khớp nhưng không tạo vị thế")
-                        self.stop_symbol(symbol)
+                        self.stop_symbol(symbol, failed=True)
                         return False
 
                     pyramiding_info = {}
@@ -1601,6 +1632,10 @@ class BaseBot:
 
                     self.bot_coordinator.bot_has_coin(self.bot_id)
 
+                    # FIXED: Xoá coin khỏi blacklist nếu có (tuỳ chọn)
+                    if self._bot_manager:
+                        self._bot_manager.bot_coordinator.release_coin(symbol)
+
                     message = (f"✅ <b>ĐÃ MỞ VỊ THẾ {symbol}</b>\n"
                                f"🤖 Bot: {self.bot_id}\n📌 Hướng: {side}\n"
                                f"🏷️ Entry: {avg_price:.4f}\n📊 Khối lượng: {executed_qty:.4f}\n"
@@ -1619,12 +1654,12 @@ class BaseBot:
                         if code == -2019:
                             self.log(f"❌ {symbol} - Không đủ margin")
                     self.log(f"❌ {symbol} - Lỗi lệnh: {error_msg}")
-                    self.stop_symbol(symbol)
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
             except Exception as e:
                 self.log(f"❌ {symbol} - Lỗi mở vị thế: {str(e)}")
-                self.stop_symbol(symbol)
+                self.stop_symbol(symbol, failed=True)
                 return False
 
     def _close_symbol_position(self, symbol, reason=""):
@@ -1660,6 +1695,29 @@ class BaseBot:
             except Exception as e:
                 self.log(f"❌ Lỗi đóng vị thế {symbol}: {str(e)}")
                 return False
+
+    # FIXED: Thêm tham số failed vào stop_symbol
+    def stop_symbol(self, symbol, failed=False):
+        if symbol not in self.active_symbols:
+            return False
+        self.log(f"⛔ Đang dừng coin {symbol}...{' (lỗi)' if failed else ''}")
+        if self.symbol_data[symbol]['position_open']:
+            self._close_symbol_position(symbol, reason="(Stop by user)")
+        self.ws_manager.remove_symbol(symbol)
+        self.active_symbols.remove(symbol)
+        self.coin_manager.unregister_coin(symbol)
+
+        # Nếu thất bại (không mở được lệnh) → release coin và blacklist tạm
+        if failed and self._bot_manager:
+            self._bot_manager.bot_coordinator.release_coin(symbol)
+            self._bot_manager.bot_coordinator.add_temp_blacklist(symbol, duration=300)
+
+        if not self.active_symbols:
+            self.bot_coordinator.bot_lost_coin(self.bot_id)
+            self.bot_coordinator.finish_coin_search(self.bot_id)
+            self.status = "searching"
+        self.log(f"✅ Đã dừng coin {symbol}")
+        return True
 
     # ---------- Kiểm tra an toàn ký quỹ ----------
     def _check_margin_safety(self):
@@ -1843,23 +1901,6 @@ class BaseBot:
                 return random.choice(["BUY", "SELL"])
 
     # ---------- Dừng và dọn dẹp ----------
-    def stop_symbol(self, symbol):
-        if symbol not in self.active_symbols:
-            return False
-        self.log(f"⛔ Đang dừng coin {symbol}...")
-        if self.symbol_data[symbol]['position_open']:
-            self._close_symbol_position(symbol, reason="(Stop by user)")
-        self.ws_manager.remove_symbol(symbol)
-        self.active_symbols.remove(symbol)
-        self.coin_manager.unregister_coin(symbol)
-        self.log(f"✅ Đã dừng coin {symbol}")
-
-        if not self.active_symbols:
-            self.bot_coordinator.bot_lost_coin(self.bot_id)
-            self.bot_coordinator.finish_coin_search(self.bot_id)
-            self.status = "searching"
-        return True
-
     def stop_all_symbols(self):
         count = 0
         for symbol in self.active_symbols.copy():
@@ -2296,7 +2337,7 @@ class BotManager:
             logger.error(f"Lỗi xử lý tin nhắn Telegram: {str(e)}")
 
     def _process_telegram_command(self, chat_id, text):
-        # (Giữ nguyên, chỉ lưu ý rằng không có thay đổi ở phần này)
+        # (Giữ nguyên, không thay đổi)
         user_state = self.user_states.get(chat_id, {})
         current_step = user_state.get('step')
 
