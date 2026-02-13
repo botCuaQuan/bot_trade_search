@@ -1476,14 +1476,13 @@ class BaseBot:
         try:
             has_pos = _POSITION_CACHE.has_position(symbol)
             if has_pos:
-                # Trường hợp bot chưa biết có vị thế (position_open = False)
                 if not self.symbol_data[symbol]['position_open']:
                     positions = _POSITION_CACHE.get_positions(symbol)
                     if positions:
                         pos = positions[0]
                         entry_price = float(pos.get('entryPrice', 0))
                         position_amt = float(pos.get('positionAmt', 0))
-                        # Chỉ cập nhật nếu entry_price hợp lệ
+                        # Chỉ cập nhật nếu entry_price hợp lệ (> 0)
                         if entry_price > 0:
                             self.symbol_data[symbol].update({
                                 'position_open': True,
@@ -1495,16 +1494,8 @@ class BaseBot:
                             })
                             self.log(f"📌 Vị thế {symbol} đã mở từ Binance")
                         else:
-                            self.log(f"⚠️ {symbol} - entryPrice từ Binance = 0, chưa cập nhật")
-                else:
-                    # Đã có vị thế, chỉ cập nhật khối lượng nếu thay đổi (ví dụ nhồi lệnh từ bot khác)
-                    positions = _POSITION_CACHE.get_positions(symbol)
-                    if positions:
-                        pos = positions[0]
-                        position_amt = float(pos.get('positionAmt', 0))
-                        if abs(position_amt) != abs(self.symbol_data[symbol]['qty']):
-                            self.symbol_data[symbol]['qty'] = position_amt
-                            self.log(f"🔄 {symbol} - Cập nhật khối lượng từ cache: {position_amt}")
+                            self.log(f"⚠️ {symbol} - entryPrice từ Binance = 0, chưa cập nhật (sẽ thử lại sau)")
+                return
             else:
                 if self.symbol_data[symbol]['position_open']:
                     self._reset_symbol_position(symbol)
@@ -1531,25 +1522,24 @@ class BaseBot:
 
     # ---------- Mở / Đóng lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ) ----------
     def _open_symbol_position(self, symbol, side):
-        # Sử dụng lock để tránh race condition với bot khác
         with self.symbol_locks[symbol]:
             try:
-                # Kiểm tra lại vị thế sau khi lock (phòng trường hợp bot khác vừa mở)
+                # Kiểm tra lại vị thế sau khi lock
                 if self.coin_finder.has_existing_position(symbol):
                     self.log(f"⚠️ {symbol} - CÓ VỊ THẾ TRÊN BINANCE (phát hiện sau lock), BỎ QUA")
                     self.stop_symbol(symbol, failed=True)
                     return False
-
+    
                 self._check_symbol_position(symbol)
                 if self.symbol_data[symbol]['position_open']:
                     return False
-
-                # FIXED: Không so sánh với max_leverage từ cache, thử set leverage trực tiếp
+    
+                # Set leverage
                 if not set_leverage(symbol, self.lev, self.api_key, self.api_secret):
                     self.log(f"❌ {symbol} - Không thể cài đặt đòn bẩy {self.lev}x (Binance từ chối)")
                     self.stop_symbol(symbol, failed=True)
                     return False
-
+    
                 # Lấy tổng số dư và số dư khả dụng
                 total_balance, available_balance = get_total_and_available_balance(self.api_key, self.api_secret)
                 if total_balance is None or total_balance <= 0:
@@ -1557,13 +1547,14 @@ class BaseBot:
                     self.stop_symbol(symbol, failed=True)
                     return False
     
+                # Tính vốn dựa trên TỔNG SỐ DƯ
                 required_usd = total_balance * (self.percent / 100)
                 if required_usd <= 0:
                     self.log(f"❌ {symbol} - Tổng số dư quá nhỏ ({total_balance:.2f})")
                     self.stop_symbol(symbol, failed=True)
                     return False
     
-                # Cảnh báo nếu required_usd > available_balance
+                # Cảnh báo nếu vượt quá khả dụng (Binance sẽ tự từ chối nếu không đủ margin)
                 if required_usd > available_balance:
                     self.log(f"⚠️ {symbol} - {self.percent}% tổng số dư ({required_usd:.2f}) > số dư khả dụng ({available_balance:.2f}), vẫn thử lệnh...")
     
@@ -1573,7 +1564,6 @@ class BaseBot:
                     self.stop_symbol(symbol, failed=True)
                     return False
     
-                # Tính qty, kiểm tra minQty, minNotional...
                 step_size = get_step_size(symbol)
                 min_qty = get_min_qty_from_cache(symbol)
                 min_notional = get_min_notional_from_cache(symbol)
@@ -1584,13 +1574,13 @@ class BaseBot:
                     qty = round(qty, 8)
     
                 if qty < min_qty:
-                    self.log(f"❌ {symbol} - Khối lượng {qty} < minQty {min_qty}")
+                    self.log(f"❌ {symbol} - Khối lượng {qty} nhỏ hơn minQty {min_qty}")
                     self.stop_symbol(symbol, failed=True)
                     return False
     
                 notional_value = qty * current_price
                 if notional_value < min_notional:
-                    self.log(f"❌ {symbol} - Giá trị danh nghĩa {notional_value:.2f} < {min_notional}")
+                    self.log(f"❌ {symbol} - Giá trị danh nghĩa {notional_value:.2f} < {min_notional} (minNotional)")
                     self.stop_symbol(symbol, failed=True)
                     return False
     
@@ -1612,7 +1602,15 @@ class BaseBot:
                         self.stop_symbol(symbol, failed=True)
                         return False
     
-                    # === TỰ CẬP NHẬT VỊ THẾ NGAY LẬP TỨC ===
+                    time.sleep(1)
+                    _POSITION_CACHE.refresh(force=True)
+                    self._check_symbol_position(symbol)
+    
+                    if not self.symbol_data[symbol]['position_open']:
+                        self.log(f"❌ {symbol} - Lệnh đã khớp nhưng không tạo vị thế")
+                        self.stop_symbol(symbol, failed=True)
+                        return False
+    
                     pyramiding_info = {}
                     if self.pyramiding_enabled:
                         pyramiding_info = {
@@ -1637,11 +1635,10 @@ class BaseBot:
     
                     self.bot_coordinator.bot_has_coin(self.bot_id)
     
-                    # Refresh cache để đồng bộ, nhưng không dùng để kiểm tra lại
-                    time.sleep(1)
-                    _POSITION_CACHE.refresh(force=True)
+                    # Xoá coin khỏi blacklist nếu có
+                    if self._bot_manager:
+                        self._bot_manager.bot_coordinator.release_coin(symbol)
     
-                    # Gửi thông báo
                     message = (f"✅ <b>ĐÃ MỞ VỊ THẾ {symbol}</b>\n"
                                f"🤖 Bot: {self.bot_id}\n📌 Hướng: {side}\n"
                                f"🏷️ Entry: {avg_price:.4f}\n📊 Khối lượng: {executed_qty:.4f}\n"
@@ -1743,20 +1740,24 @@ class BaseBot:
         data = self.symbol_data[symbol]
         if not data['position_open']:
             return
-
+    
         entry = data['entry']
+        if entry <= 0:
+            self.log(f"⚠️ {symbol} - entry không hợp lệ ({entry}), bỏ qua TP/SL (chờ cập nhật)")
+            return
+    
         current_price = self.get_current_price(symbol)
         if current_price <= 0:
             return
-
+    
         if data['side'] == 'BUY':
             roi = (current_price - entry) / entry * 100
         else:
             roi = (entry - current_price) / entry * 100
-
+    
         if roi > data['high_water_mark_roi']:
             data['high_water_mark_roi'] = roi
-
+    
         if self.tp and roi >= self.tp:
             self._close_symbol_position(symbol, reason=f"(TP {self.tp}%)")
             return
@@ -1775,17 +1776,21 @@ class BaseBot:
             return
         if data['pyramiding_count'] >= self.pyramiding_n:
             return
-
+    
         entry = data['entry_base']
+        if entry <= 0:
+            self.log(f"⚠️ {symbol} - entry_base không hợp lệ ({entry}), bỏ qua pyramiding")
+            return
+    
         current_price = self.get_current_price(symbol)
         if current_price <= 0:
             return
-
+    
         if data['side'] == 'BUY':
             roi = (current_price - entry) / entry * 100
         else:
             roi = (entry - current_price) / entry * 100
-
+    
         next_roi = data['next_pyramiding_roi']
         if roi >= next_roi:
             self._pyramid_order(symbol, data['side'])
@@ -1793,32 +1798,31 @@ class BaseBot:
             data['next_pyramiding_roi'] = next_roi + self.pyramiding_x
             data['last_pyramiding_time'] = time.time()
             self.log(f"🔄 Nhồi lệnh {symbol} lần {data['pyramiding_count']} tại ROI {roi:.2f}%")
-
     def _pyramid_order(self, symbol, side):
         try:
             total_balance, available_balance = get_total_and_available_balance(self.api_key, self.api_secret)
             if total_balance is None or total_balance <= 0:
                 return
-
+    
             # Tính vốn dựa trên TỔNG SỐ DƯ
             usd_amount = total_balance * (self.percent / 100)
-
+    
             if usd_amount > available_balance:
                 self.log(f"⚠️ {symbol} - Nhồi lệnh: {self.percent}% tổng số dư ({usd_amount:.2f}) lớn hơn số dư khả dụng ({available_balance:.2f}), vẫn thử...")
-
+    
             current_price = self.get_current_price(symbol)
             if current_price <= 0:
                 return
-
+    
             step_size = get_step_size(symbol)
             min_qty = get_min_qty_from_cache(symbol)
             min_notional = get_min_notional_from_cache(symbol)
-
+    
             qty = (usd_amount * self.lev) / current_price
             if step_size > 0:
                 qty = math.floor(qty / step_size) * step_size
                 qty = round(qty, 8)
-
+    
             if qty < min_qty:
                 self.log(f"⚠️ Không thể nhồi lệnh {symbol}: khối lượng {qty} < minQty {min_qty}")
                 return
@@ -1828,22 +1832,22 @@ class BaseBot:
                 return
             if qty <= 0:
                 return
-
+    
             result = place_order(symbol, side, qty, self.api_key, self.api_secret)
             if result and 'orderId' in result:
                 executed_qty = float(result.get('executedQty', 0))
                 avg_price = float(result.get('avgPrice', current_price))
-
+    
                 if executed_qty < 0:
                     self.log(f"⚠️ Lệnh nhồi {symbol} không khớp")
                     return
-
+    
                 old_qty = self.symbol_data[symbol]['qty']
                 old_entry = self.symbol_data[symbol]['entry']
-
+    
                 new_qty = old_qty + (executed_qty if side == "BUY" else -executed_qty)
                 new_entry = (old_entry * abs(old_qty) + avg_price * executed_qty) / (abs(old_qty) + executed_qty)
-
+    
                 self.symbol_data[symbol].update({
                     'qty': new_qty,
                     'entry': new_entry,
@@ -1861,26 +1865,29 @@ class BaseBot:
         data = self.symbol_data[symbol]
         if not data['position_open']:
             return False
-
+    
         entry = data['entry_base']
+        if entry <= 0:
+            self.log(f"⚠️ {symbol} - entry_base không hợp lệ ({entry}), bỏ qua smart exit")
+            return False
+    
         current_price = self.get_current_price(symbol)
         if current_price <= 0:
             return False
-
+    
         if data['side'] == 'BUY':
             roi = (current_price - entry) / entry * 100
         else:
             roi = (entry - current_price) / entry * 100
-
+    
         if roi >= self.roi_trigger and not data['roi_check_activated']:
             data['roi_check_activated'] = True
             self.log(f"🎯 ROI đạt {roi:.2f}% - Kích hoạt chốt lời sớm")
-
+    
         if data['roi_check_activated'] and roi < data['high_water_mark_roi'] * 0.9:
             self._close_symbol_position(symbol, reason=f"(Smart exit - ROI từ {data['high_water_mark_roi']:.2f}% giảm còn {roi:.2f}%)")
             return True
         return False
-
     # ---------- Kiểm tra toàn cục ----------
     def check_global_positions(self):
         if hasattr(self, '_bot_manager') and self._bot_manager and hasattr(self._bot_manager, 'global_side_coordinator'):
