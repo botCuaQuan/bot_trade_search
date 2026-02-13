@@ -1516,7 +1516,7 @@ class BaseBot:
             })
             self.symbol_data[symbol]['last_close_time'] = time.time()
 
-    # ---------- Mở / Đóng lệnh (ĐÃ SỬA LỖI LEVERAGE & THÊM LOCK) ----------
+    # ---------- Mở / Đóng lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ) ----------
     def _open_symbol_position(self, symbol, side):
         # Sử dụng lock để tránh race condition với bot khác
         with self.symbol_locks[symbol]:
@@ -1524,7 +1524,7 @@ class BaseBot:
                 # Kiểm tra lại vị thế sau khi lock (phòng trường hợp bot khác vừa mở)
                 if self.coin_finder.has_existing_position(symbol):
                     self.log(f"⚠️ {symbol} - CÓ VỊ THẾ TRÊN BINANCE (phát hiện sau lock), BỎ QUA")
-                    self.stop_symbol(symbol, failed=True)  # FIXED: thất bại nên đưa vào blacklist
+                    self.stop_symbol(symbol, failed=True)
                     return False
 
                 self._check_symbol_position(symbol)
@@ -1537,19 +1537,23 @@ class BaseBot:
                     self.stop_symbol(symbol, failed=True)
                     return False
 
-                # Lấy số dư khả dụng (FIXED: dùng available_balance)
+                # Lấy tổng số dư và số dư khả dụng
                 total_balance, available_balance = get_total_and_available_balance(self.api_key, self.api_secret)
-                if available_balance is None or available_balance <= 0:
-                    self.log(f"❌ {symbol} - Không đủ số dư khả dụng")
+                if total_balance is None or total_balance <= 0:
+                    self.log(f"❌ {symbol} - Không thể lấy tổng số dư")
                     self.stop_symbol(symbol, failed=True)
                     return False
 
-                # Tính vốn dựa trên available_balance (FIXED)
-                required_usd = available_balance * (self.percent / 100)
+                # Tính vốn dựa trên TỔNG SỐ DƯ (thay vì khả dụng)
+                required_usd = total_balance * (self.percent / 100)
                 if required_usd <= 0:
-                    self.log(f"❌ {symbol} - Số dư khả dụng quá nhỏ ({available_balance:.2f})")
+                    self.log(f"❌ {symbol} - Tổng số dư quá nhỏ ({total_balance:.2f})")
                     self.stop_symbol(symbol, failed=True)
                     return False
+
+                # Kiểm tra an toàn: nếu required_usd > available_balance, vẫn thử (Binance sẽ từ chối nếu không đủ margin)
+                if required_usd > available_balance:
+                    self.log(f"⚠️ {symbol} - Cảnh báo: {self.percent}% tổng số dư ({required_usd:.2f}) lớn hơn số dư khả dụng ({available_balance:.2f}), vẫn thử lệnh...")
 
                 current_price = self.get_current_price(symbol)
                 if current_price <= 0:
@@ -1561,8 +1565,8 @@ class BaseBot:
                 min_qty = get_min_qty_from_cache(symbol)
                 min_notional = get_min_notional_from_cache(symbol)
 
-                usd_amount = available_balance * (self.percent / 100)
-                qty = (usd_amount * self.lev) / current_price
+                # Tính khối lượng dựa trên required_usd (tổng số dư * %)
+                qty = (required_usd * self.lev) / current_price
                 if step_size > 0:
                     qty = math.floor(qty / step_size) * step_size
                     qty = round(qty, 8)
@@ -1629,7 +1633,7 @@ class BaseBot:
 
                     self.bot_coordinator.bot_has_coin(self.bot_id)
 
-                    # FIXED: Xoá coin khỏi blacklist nếu có (tuỳ chọn)
+                    # Xoá coin khỏi blacklist nếu có
                     if self._bot_manager:
                         self._bot_manager.bot_coordinator.release_coin(symbol)
 
@@ -1693,7 +1697,6 @@ class BaseBot:
                 self.log(f"❌ Lỗi đóng vị thế {symbol}: {str(e)}")
                 return False
 
-    # FIXED: Thêm tham số failed vào stop_symbol
     def stop_symbol(self, symbol, failed=False):
         if symbol not in self.active_symbols:
             return False
@@ -1759,7 +1762,7 @@ class BaseBot:
             self._close_symbol_position(symbol, reason=f"(SL {self.sl}%)")
             return
 
-    # ---------- Nhồi lệnh ----------
+    # ---------- Nhồi lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ) ----------
     def _check_pyramiding(self, symbol):
         if not self.pyramiding_enabled:
             return
@@ -1792,8 +1795,14 @@ class BaseBot:
     def _pyramid_order(self, symbol, side):
         try:
             total_balance, available_balance = get_total_and_available_balance(self.api_key, self.api_secret)
-            if available_balance is None or available_balance <= 0:
+            if total_balance is None or total_balance <= 0:
                 return
+
+            # Tính vốn dựa trên TỔNG SỐ DƯ
+            usd_amount = total_balance * (self.percent / 100)
+
+            if usd_amount > available_balance:
+                self.log(f"⚠️ {symbol} - Nhồi lệnh: {self.percent}% tổng số dư ({usd_amount:.2f}) lớn hơn số dư khả dụng ({available_balance:.2f}), vẫn thử...")
 
             current_price = self.get_current_price(symbol)
             if current_price <= 0:
@@ -1803,7 +1812,6 @@ class BaseBot:
             min_qty = get_min_qty_from_cache(symbol)
             min_notional = get_min_notional_from_cache(symbol)
 
-            usd_amount = available_balance * (self.percent / 100)  # FIXED: dùng available
             qty = (usd_amount * self.lev) / current_price
             if step_size > 0:
                 qty = math.floor(qty / step_size) * step_size
