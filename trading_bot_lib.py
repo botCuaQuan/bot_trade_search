@@ -1,4 +1,4 @@
-# trading_bot_lib_final.py (HOÀN CHỈNH - KHÔNG CACHE)
+# trading_bot_lib_final.py (HOÀN CHỈNH - KHÔNG CACHE, GIẢM LOG)
 # =============================================================================
 #  TÍNH NĂNG NỔI BẬT:
 #  1. FIFO queue cho bot động: chỉ 1 bot được tìm coin tại 1 thời điểm.
@@ -6,10 +6,11 @@
 #  3. SẮP XẾP COIN THEO KHỐI LƯỢNG GIẢM DẦN – ưu tiên thanh khoản.
 #  4. Cân bằng lệnh toàn cục dựa trên số lượng vị thế LONG/SHORT (gọi API trực tiếp).
 #  5. TỰ ĐỘNG GIẢM ĐÒN BẨY khi không tìm thấy coin – giữ bot hoạt động (tuỳ chọn).
-#  6. LOG CHI TIẾT NGUYÊN NHÂN KHÔNG TÌM THẤY COIN – dễ debug.
+#  6. LOG CHI TIẾT NGUYÊN NHÂN KHÔNG TÌM THẤY COIN – dễ debug (nhưng giảm tần suất).
 #  7. Hỗ trợ đầy đủ USDT và USDC.
 #  8. Telegram tương tác + cấu hình trực quan, xử lý bất đồng bộ.
 #  9. KHÔNG CÒN CACHE – dữ liệu luôn được lấy trực tiếp từ Binance, tránh lỗi do cache cũ.
+# 10. GIẢM LOG KHÔNG CẦN THIẾT – bot chỉ log khi có sự kiện quan trọng, trạng thái chờ log rất thưa.
 # =============================================================================
 
 import json
@@ -572,7 +573,7 @@ def get_all_coins_with_info():
         logger.error(traceback.format_exc())
         return []
 
-# ========== HÀM LỌC COIN – CÓ SẮP XẾP VOLUME GIẢM DẦN ==========
+# ========== HÀM LỌC COIN – CÓ SẮP XẾP VOLUME GIẢM DẦN (GIẢM LOG) ==========
 def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
     """
     Lọc coin theo chiến lược CÂN BẰNG.
@@ -582,7 +583,7 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
     - SẮP XẾP theo volume giảm dần (thanh khoản cao nhất lên đầu)
     - LOẠI BỎ coin có giá <= 0, nhưng giữ coin volume 0.
     """
-    all_coins = get_all_coins_with_info()  # Gọi trực tiếp API mỗi lần
+    all_coins = get_all_coins_with_info()
     filtered = []
 
     if not all_coins:
@@ -595,9 +596,8 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
     buy_threshold = _BALANCE_CONFIG.get("buy_price_threshold", 1.0)
     sell_threshold = _BALANCE_CONFIG.get("sell_price_threshold", 10.0)
 
-    logger.info(f"🔍 Lọc coin {side} | {len(all_coins)} coin từ Binance")
-    logger.info(f"⚙️ Ngưỡng: MUA < {buy_threshold} USDT/USDC, BÁN > {sell_threshold} USDT/USDC | Đòn bẩy tối thiểu: {min_leverage}x")
-    logger.info(f"📊 SẮP XẾP: Theo khối lượng giảm dần")
+    # Chỉ log một dòng tổng quan, không log chi tiết từng coin để tránh spam
+    logger.info(f"🔍 Lọc coin {side} | {len(all_coins)} coin | Ngưỡng: MUA<{buy_threshold} BÁN>{sell_threshold} | Lev>={min_leverage}x")
 
     excluded_set = set(excluded_coins or [])
     blacklisted = 0
@@ -622,7 +622,7 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
             price_zero += 1
             continue
         if coin['volume'] <= 0:
-            volume_zero += 1   # vẫn giữ coin volume 0
+            volume_zero += 1
 
         if side == "BUY" and coin['price'] >= buy_threshold:
             price_fail += 1
@@ -633,13 +633,13 @@ def filter_coins_for_side(side, excluded_coins=None, min_leverage=None):
 
         filtered.append(coin)
 
-    # SẮP XẾP THEO VOLUME GIẢM DẦN
     filtered.sort(key=lambda x: x['volume'], reverse=True)
 
     logger.info(f"📊 {side}: {len(filtered)} coin phù hợp (loại: blacklist={blacklisted}, excluded={excluded_cnt}, lev={lev_fail}, giá={price_fail}, volume0={volume_zero}, price0={price_zero})")
-    if filtered:
-        for i, c in enumerate(filtered[:5]):
-            logger.info(f"  {i+1}. {c['symbol']} | giá: {c['price']:.4f} | volume: {c['volume']:.2f} | lev: {c['max_leverage']}x")
+    # Chỉ log 3 coin đầu tiên ở mức debug
+    if filtered and logger.isEnabledFor(logging.DEBUG):
+        for i, c in enumerate(filtered[:3]):
+            logger.debug(f"  {i+1}. {c['symbol']} | giá: {c['price']:.4f} | volume: {c['volume']:.2f} | lev: {c['max_leverage']}x")
 
     return filtered
 
@@ -1017,8 +1017,9 @@ class SmartCoinFinder:
             )
 
             if not filtered_coins:
-                if now - self.last_failed_search_log > 60:
-                    logger.warning(f"⚠️ Không tìm thấy coin phù hợp cho hướng {target_side}")
+                # Giảm tần suất log xuống 5 phút một lần
+                if now - self.last_failed_search_log > 300:
+                    logger.warning(f"⚠️ Không tìm thấy coin phù hợp cho hướng {target_side} (đã thử {self.scan_cooldown}s gần nhất)")
                     self.last_failed_search_log = now
                 return None
 
@@ -1031,7 +1032,7 @@ class SmartCoinFinder:
                 logger.info(f"✅ Tìm thấy coin {symbol} phù hợp ({target_side}) | volume: {coin['volume']:.2f}")
                 return symbol
 
-            logger.warning(f"⚠️ Đã duyệt {len(filtered_coins)} coin nhưng không có coin nào chưa có vị thế")
+            logger.info(f"⚠️ Đã duyệt {len(filtered_coins)} coin nhưng không có coin nào chưa có vị thế")
             return None
 
         except Exception as e:
@@ -1216,8 +1217,9 @@ class BaseBot:
 
     def _run(self):
         last_coin_search_log = 0
-        log_interval = 30
+        log_interval = 120  # Tăng lên 120 giây để giảm log chờ
         last_no_coin_found_log = 0
+        no_coin_found_interval = 300  # Chỉ log khi không tìm thấy coin mỗi 5 phút
 
         while not self._stop:
             try:
@@ -1237,11 +1239,8 @@ class BaseBot:
                     search_permission = self.bot_coordinator.request_coin_search(self.bot_id)
 
                     if search_permission:
-                        if current_time - last_coin_search_log > log_interval:
-                            queue_info = self.bot_coordinator.get_queue_info()
-                            self.log(f"🔍 Đang tìm coin (vị trí: 1/{queue_info['queue_size'] + 1})...")
-                            last_coin_search_log = current_time
-
+                        # Được phép tìm coin
+                        # Không log mỗi lần, chỉ log khi thực sự tìm thấy hoặc sau interval dài
                         found_coin = None
                         if self.enable_balance_orders:
                             found_coin = self.coin_finder.find_best_coin_with_balance(
@@ -1252,20 +1251,20 @@ class BaseBot:
                             self.bot_coordinator.bot_has_coin(self.bot_id)
                             self._add_symbol(found_coin)
                             self.bot_coordinator.finish_coin_search(self.bot_id, found_coin, has_coin_now=True)
-                            self.log(f"✅ Đã tìm thấy coin: {found_coin}, đang chờ vào lệnh...")
+                            self.log(f"✅ Đã tìm thấy coin: {found_coin}")
                             last_coin_search_log = 0
                         else:
                             self.bot_coordinator.finish_coin_search(self.bot_id)
-                            if current_time - last_no_coin_found_log > 60:
-                                self.log(f"❌ Không tìm thấy coin phù hợp")
+                            if current_time - last_no_coin_found_log > no_coin_found_interval:
+                                self.log(f"❌ Không tìm thấy coin phù hợp (đã thử trong {no_coin_found_interval//60} phút)")
                                 last_no_coin_found_log = current_time
                     else:
+                        # Không được phép tìm, đang chờ
                         queue_pos = self.bot_coordinator.get_queue_position(self.bot_id)
-                        if queue_pos > 0:
+                        if queue_pos > 0 and current_time - last_coin_search_log > log_interval:
                             queue_info = self.bot_coordinator.get_queue_info()
-                            if current_time - last_coin_search_log > log_interval:
-                                self.log(f"⏳ Đang chờ tìm coin (vị trí: {queue_pos}/{queue_info['queue_size'] + 1}) - Bot đang tìm: {queue_info['current_finding']}")
-                                last_coin_search_log = current_time
+                            self.log(f"⏳ Đang chờ tìm coin (vị trí: {queue_pos}/{queue_info['queue_size'] + 1}) - Bot đang tìm: {queue_info['current_finding']}")
+                            last_coin_search_log = current_time
                         time.sleep(2)
 
                     time.sleep(5)
@@ -2554,7 +2553,6 @@ class BotManager:
                 send_telegram(config_info, chat_id=chat_id,
                              bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
             elif text == '🔄 Làm mới cache':
-                # Không còn cache, thông báo đơn giản
                 send_telegram("✅ Hệ thống không sử dụng cache, dữ liệu luôn được lấy trực tiếp từ Binance.",
                              chat_id=chat_id,
                              bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
