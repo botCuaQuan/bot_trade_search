@@ -1591,10 +1591,7 @@ class BaseBot:
                     executed_qty = float(result.get('executedQty', 0))
                     avg_price = float(result.get('avgPrice', current_price))
 
-                    if executed_qty < qty * 0.99:
-                        self.log(f"⚠️ {symbol} - Lệnh khớp một phần: {executed_qty} / {qty}")
-
-                    if executed_qty <= 0:
+                    if executed_qty < 0:
                         self.log(f"❌ {symbol} - Lệnh không khớp")
                         self.stop_symbol(symbol, failed=True)
                         return False
@@ -1827,7 +1824,7 @@ class BaseBot:
                 executed_qty = float(result.get('executedQty', 0))
                 avg_price = float(result.get('avgPrice', current_price))
 
-                if executed_qty <= 0:
+                if executed_qty < 0:
                     self.log(f"⚠️ Lệnh nhồi {symbol} không khớp")
                     return
 
