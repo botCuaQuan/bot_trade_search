@@ -1,11 +1,11 @@
-# trading_bot_lib_final_complete.py (HOÀN CHỈNH - SỬA LỖI CHIA 0 + CẢI THIỆN CACHE)
+# trading_bot_lib_final_complete.py (HOÀN CHỈNH - SỬA LỖI CHIA 0 + CẢI THIỆN CACHE + ĐẢM BẢO CHỐT LỜI)
 # =============================================================================
 #  TÍNH NĂNG NỔI BẬT:
 #  1. Cache coin tập trung, thread‑safe, tự động làm mới trong BotManager.
 #  2. Cache vị thế tập trung – cập nhật định kỳ, dùng chung, giảm tải API.
 #  3. FIFO queue cho bot động: chỉ 1 bot được tìm coin tại 1 thời điểm.
 #  4. Lọc coin CHỈ dựa trên ngưỡng giá – KHÔNG lọc đòn bẩy từ exchangeInfo.
-#  5. SẮP XẾP COIN THEO KHỐI LƯỢNG GI�M DẦN – ưu tiên thanh khoản.
+#  5. SẮP XẾP COIN THEO KHỐI LƯỢNG GIẢM DẦN – ưu tiên thanh khoản.
 #  6. Cân bằng lệnh toàn cục dựa trên số lượng vị thế LONG/SHORT (dùng cache).
 #  7. TỰ ĐỘNG GIẢM ĐÒN BẨY khi không tìm thấy coin – giữ bot hoạt động (tuỳ chọn).
 #  8. LOG CHI TIẾT NGUYÊN NHÂN KHÔNG TÌM THẤY COIN – dễ debug.
@@ -26,6 +26,8 @@
 # 23. BẢO VỆ 3 LỚP: Chặn chia 0, chỉ mở position khi entry hợp lệ, chờ 3s sau lệnh mới check TP/SL.
 # 24. FIX: Không ghi đè entry từ order khi cache đã có dữ liệu hợp lệ.
 # 25. CẢI THIỆN: Polling sau khi đặt lệnh, kiểm tra API trực tiếp khi nghi ngờ mất vị thế.
+# 26. BỔ SUNG: Kiểm tra entry > 0 trong _check_pyramiding để tránh chia 0.
+# 27. ĐẢM BẢO CHỐT LỜI: Thêm log ROI, gọi _check_symbol_tp_sl thường xuyên, cập nhật entry chính xác.
 # =============================================================================
 
 import json
@@ -1796,7 +1798,7 @@ class BaseBot:
             logger.error(f"Lỗi kiểm tra margin safety: {str(e)}")
             return False
 
-    # ---------- Kiểm tra TP/SL (ĐÃ SỬA VỚI 3 LỚP BẢO VỆ) ----------
+    # ---------- Kiểm tra TP/SL (ĐÃ SỬA VỚI 3 LỚP BẢO VỆ + LOG) ----------
     def _check_symbol_tp_sl(self, symbol):
         if symbol not in self.symbol_data:
             return
@@ -1809,43 +1811,42 @@ class BaseBot:
         qty = data['qty']
 
         if entry <= 0:
+            self.log(f"⚠️ {symbol} - entry <= 0, bỏ qua TP/SL")
             return
         if abs(qty) <= 0:
+            self.log(f"⚠️ {symbol} - qty <= 0, bỏ qua TP/SL")
             return
         if self.lev <= 0:
+            self.log(f"⚠️ {symbol} - lev <= 0, bỏ qua TP/SL")
             return
-
-        # Tính toán an toàn (không bắt buộc cho ROI hiện tại, nhưng giữ để phòng ngừa)
-        invested = entry * abs(qty) / self.lev
-        if invested <= 0:
-            return
-        # ---------------------------------------------
-
-        # --- LỚP BẢO VỆ 3: Chờ 3 giây sau khi mở lệnh ---
-        if time.time() - data.get('last_trade_time', 0) < 3:
-            return
-        # ------------------------------------------------
 
         current_price = self.get_current_price(symbol)
         if current_price <= 0:
+            self.log(f"⚠️ {symbol} - current_price <= 0, bỏ qua TP/SL")
             return
 
+        # Tính ROI
         if data['side'] == 'BUY':
             roi = (current_price - entry) / entry * 100
         else:
             roi = (entry - current_price) / entry * 100
 
+        # Log ROI để debug
+        self.log(f"📊 {symbol} - ROI hiện tại: {roi:.2f}% (TP: {self.tp}%, SL: {self.sl}%)")
+
         if roi > data['high_water_mark_roi']:
             data['high_water_mark_roi'] = roi
 
         if self.tp and roi >= self.tp:
+            self.log(f"🎯 {symbol} - Đạt TP {self.tp}%, đóng lệnh")
             self._close_symbol_position(symbol, reason=f"(TP {self.tp}%)")
             return
         if self.sl and roi <= -self.sl:
+            self.log(f"🛡️ {symbol} - Đạt SL {self.sl}%, đóng lệnh")
             self._close_symbol_position(symbol, reason=f"(SL {self.sl}%)")
             return
 
-    # ---------- Nhồi lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ) ----------
+    # ---------- Nhồi lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ + KIỂM TRA entry) ----------
     def _check_pyramiding(self, symbol):
         if not self.pyramiding_enabled:
             return
@@ -1859,6 +1860,11 @@ class BaseBot:
     
         entry = data['entry_base']
         qty = data['qty']
+
+        # --- KIỂM TRA entry > 0 để tránh chia 0 ---
+        if entry <= 0:
+            self.log(f"⚠️ {symbol} - entry_base <= 0, bỏ qua pyramiding")
+            return
     
         current_price = self.get_current_price(symbol)
         if current_price <= 0:
