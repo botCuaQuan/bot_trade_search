@@ -1,11 +1,11 @@
-# trading_bot_lib_final_complete.py (HOÀN CHỈNH - ĐÃ SỬA LỖI CHIA 0 + BẢO VỆ 3 LỚP + FIX GHI ĐÈ ENTRY)
+# trading_bot_lib_final_complete.py (HOÀN CHỈNH - SỬA LỖI CHIA 0 + CẢI THIỆN CACHE)
 # =============================================================================
 #  TÍNH NĂNG NỔI BẬT:
 #  1. Cache coin tập trung, thread‑safe, tự động làm mới trong BotManager.
 #  2. Cache vị thế tập trung – cập nhật định kỳ, dùng chung, giảm tải API.
 #  3. FIFO queue cho bot động: chỉ 1 bot được tìm coin tại 1 thời điểm.
 #  4. Lọc coin CHỈ dựa trên ngưỡng giá – KHÔNG lọc đòn bẩy từ exchangeInfo.
-#  5. SẮP XẾP COIN THEO KHỐI LƯỢNG GIẢM DẦN – ưu tiên thanh khoản.
+#  5. SẮP XẾP COIN THEO KHỐI LƯỢNG GI�M DẦN – ưu tiên thanh khoản.
 #  6. Cân bằng lệnh toàn cục dựa trên số lượng vị thế LONG/SHORT (dùng cache).
 #  7. TỰ ĐỘNG GIẢM ĐÒN BẨY khi không tìm thấy coin – giữ bot hoạt động (tuỳ chọn).
 #  8. LOG CHI TIẾT NGUYÊN NHÂN KHÔNG TÌM THẤY COIN – dễ debug.
@@ -25,6 +25,7 @@
 # 22. FIX: TP/SL = 0 được hiểu là "tắt" (tương thích với file 30).
 # 23. BẢO VỆ 3 LỚP: Chặn chia 0, chỉ mở position khi entry hợp lệ, chờ 3s sau lệnh mới check TP/SL.
 # 24. FIX: Không ghi đè entry từ order khi cache đã có dữ liệu hợp lệ.
+# 25. CẢI THIỆN: Polling sau khi đặt lệnh, kiểm tra API trực tiếp khi nghi ngờ mất vị thế.
 # =============================================================================
 
 import json
@@ -1470,7 +1471,21 @@ class BaseBot:
             return self.symbol_data[symbol]['last_price']
         return get_current_price(symbol)
 
-    # ---------- Kiểm tra vị thế (dùng cache) ----------
+    # ---------- Kiểm tra vị thế (dùng cache và fallback API) ----------
+    def _force_check_position(self, symbol):
+        """Gọi API trực tiếp để kiểm tra vị thế của một symbol, trả về dict nếu có, None nếu không."""
+        try:
+            positions = get_positions(symbol, self.api_key, self.api_secret)
+            if positions and len(positions) > 0:
+                pos = positions[0]
+                amt = float(pos.get('positionAmt', 0))
+                if abs(amt) > 0:
+                    return pos
+            return None
+        except Exception as e:
+            logger.error(f"Lỗi force check position {symbol}: {str(e)}")
+            return None
+
     def _check_symbol_position(self, symbol):
         try:
             has_pos = _POSITION_CACHE.has_position(symbol)
@@ -1503,8 +1518,32 @@ class BaseBot:
                             self.log(f"⚠️ {symbol} - entryPrice từ Binance = 0, chưa cập nhật (sẽ thử lại sau)")
                 return
             else:
+                # Cache báo không có vị thế, nhưng bot vẫn đang coi là có → cần xác nhận lại
                 if self.symbol_data[symbol]['position_open']:
-                    self._reset_symbol_position(symbol)
+                    # Gọi API trực tiếp để chắc chắn
+                    real_pos = self._force_check_position(symbol)
+                    if real_pos:
+                        # Vị thế thực sự vẫn tồn tại, cập nhật lại cache và giữ trạng thái
+                        entry_price = float(real_pos.get('entryPrice', 0))
+                        position_amt = float(real_pos.get('positionAmt', 0))
+                        if entry_price > 0 and abs(position_amt) > 0:
+                            self.log(f"🔄 {symbol} - Cache báo mất nhưng API vẫn có, cập nhật lại")
+                            # Cập nhật cache (thông qua refresh) và cập nhật bot
+                            _POSITION_CACHE.refresh(force=True)
+                            self.symbol_data[symbol].update({
+                                'position_open': True,
+                                'entry': entry_price,
+                                'entry_base': entry_price,
+                                'qty': position_amt,
+                                'side': 'BUY' if position_amt > 0 else 'SELL',
+                                'status': 'open'
+                            })
+                        else:
+                            # Dữ liệu từ API không hợp lệ, tạm thời giữ nguyên
+                            self.log(f"⚠️ {symbol} - API trả về dữ liệu không hợp lệ, giữ trạng thái cũ")
+                    else:
+                        # API xác nhận không còn vị thế
+                        self._reset_symbol_position(symbol)
         except Exception as e:
             logger.error(f"Lỗi kiểm tra vị thế {symbol} từ cache: {str(e)}")
 
@@ -1526,7 +1565,7 @@ class BaseBot:
             })
             self.symbol_data[symbol]['last_close_time'] = time.time()
 
-    # ---------- Mở / Đóng lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ + FIX GHI ĐÈ ENTRY) ----------
+    # ---------- Mở / Đóng lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ + POLLING) ----------
     def _open_symbol_position(self, symbol, side):
         with self.symbol_locks[symbol]:
             try:
@@ -1608,15 +1647,22 @@ class BaseBot:
                         self.stop_symbol(symbol, failed=True)
                         return False
     
-                    time.sleep(1)
-                    _POSITION_CACHE.refresh(force=True)
-                    self._check_symbol_position(symbol)
+                    # Polling: thử refresh cache tối đa 3 lần, mỗi lần cách 1 giây
+                    position_found = False
+                    for attempt in range(3):
+                        time.sleep(1)
+                        _POSITION_CACHE.refresh(force=True)
+                        self._check_symbol_position(symbol)
+                        if self.symbol_data[symbol]['position_open']:
+                            position_found = True
+                            break
+                        else:
+                            self.log(f"⏳ {symbol} - Đợi cache cập nhật vị thế... lần {attempt+1}")
     
-                    # --- FIX: Không ghi đè entry nếu cache đã có vị thế hợp lệ ---
-                    if not self.symbol_data[symbol]['position_open']:
-                        # Cache chưa có vị thế, thử dùng thông tin từ order
+                    if not position_found:
+                        # Cache vẫn chưa có, thử dùng thông tin từ order nếu hợp lệ
                         if avg_price > 0 and executed_qty > 0:
-                            self.log(f"⚠️ {symbol} - Cache chưa có vị thế, dùng thông tin từ order tạm thời")
+                            self.log(f"⚠️ {symbol} - Cache chưa có vị thế sau 3 lần thử, dùng thông tin từ order tạm thời")
                             self.symbol_data[symbol].update({
                                 'entry': avg_price,
                                 'entry_base': avg_price,
@@ -1627,11 +1673,11 @@ class BaseBot:
                                 'last_trade_time': time.time()
                             })
                         else:
-                            self.log(f"❌ {symbol} - Lệnh đã khớp nhưng không tạo vị thế và không có thông tin order hợp lệ")
+                            self.log(f"❌ {symbol} - Lệnh đã khớp nhưng không thể xác nhận vị thế và thông tin order không hợp lệ")
                             self.stop_symbol(symbol, failed=True)
                             return False
     
-                    # Cập nhật các thông tin phụ (pyramiding, high_water_mark, ...) mà không ghi đè entry/qty
+                    # Cập nhật các thông tin phụ (pyramiding, high_water_mark, ...)
                     pyramiding_info = {}
                     if self.pyramiding_enabled:
                         pyramiding_info = {
@@ -1641,14 +1687,12 @@ class BaseBot:
                             'pyramiding_base_roi': 0.0,
                         }
     
-                    # Chỉ cập nhật nếu position_open đã là True (từ cache hoặc từ order)
-                    if self.symbol_data[symbol]['position_open']:
-                        self.symbol_data[symbol].update({
-                            'high_water_mark_roi': 0,
-                            'roi_check_activated': False,
-                            'last_trade_time': time.time(),
-                            **pyramiding_info
-                        })
+                    self.symbol_data[symbol].update({
+                        'high_water_mark_roi': 0,
+                        'roi_check_activated': False,
+                        'last_trade_time': time.time(),
+                        **pyramiding_info
+                    })
     
                     self.bot_coordinator.bot_has_coin(self.bot_id)
     
