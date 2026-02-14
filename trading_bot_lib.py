@@ -1,4 +1,4 @@
-# trading_bot_lib_final_complete.py (HOÀN CHỈNH - ĐÃ SỬA LỖI CHIA 0 + BẢO VỆ 3 LỚP)
+# trading_bot_lib_final_complete.py (HOÀN CHỈNH - ĐÃ SỬA LỖI CHIA 0 + BẢO VỆ 3 LỚP + FIX GHI ĐÈ ENTRY)
 # =============================================================================
 #  TÍNH NĂNG NỔI BẬT:
 #  1. Cache coin tập trung, thread‑safe, tự động làm mới trong BotManager.
@@ -24,6 +24,7 @@
 # 21. FIX: Chống chia cho 0 khi entry chưa đồng bộ – kiểm tra entry > 0 và qty != 0 ở mọi nơi.
 # 22. FIX: TP/SL = 0 được hiểu là "tắt" (tương thích với file 30).
 # 23. BẢO VỆ 3 LỚP: Chặn chia 0, chỉ mở position khi entry hợp lệ, chờ 3s sau lệnh mới check TP/SL.
+# 24. FIX: Không ghi đè entry từ order khi cache đã có dữ liệu hợp lệ.
 # =============================================================================
 
 import json
@@ -1525,7 +1526,7 @@ class BaseBot:
             })
             self.symbol_data[symbol]['last_close_time'] = time.time()
 
-    # ---------- Mở / Đóng lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ) ----------
+    # ---------- Mở / Đóng lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ + FIX GHI ĐÈ ENTRY) ----------
     def _open_symbol_position(self, symbol, side):
         with self.symbol_locks[symbol]:
             try:
@@ -1611,11 +1612,26 @@ class BaseBot:
                     _POSITION_CACHE.refresh(force=True)
                     self._check_symbol_position(symbol)
     
+                    # --- FIX: Không ghi đè entry nếu cache đã có vị thế hợp lệ ---
                     if not self.symbol_data[symbol]['position_open']:
-                        self.log(f"❌ {symbol} - Lệnh đã khớp nhưng không tạo vị thế")
-                        self.stop_symbol(symbol, failed=True)
-                        return False
+                        # Cache chưa có vị thế, thử dùng thông tin từ order
+                        if avg_price > 0 and executed_qty > 0:
+                            self.log(f"⚠️ {symbol} - Cache chưa có vị thế, dùng thông tin từ order tạm thời")
+                            self.symbol_data[symbol].update({
+                                'entry': avg_price,
+                                'entry_base': avg_price,
+                                'qty': executed_qty if side == "BUY" else -executed_qty,
+                                'side': side,
+                                'position_open': True,
+                                'status': "open",
+                                'last_trade_time': time.time()
+                            })
+                        else:
+                            self.log(f"❌ {symbol} - Lệnh đã khớp nhưng không tạo vị thế và không có thông tin order hợp lệ")
+                            self.stop_symbol(symbol, failed=True)
+                            return False
     
+                    # Cập nhật các thông tin phụ (pyramiding, high_water_mark, ...) mà không ghi đè entry/qty
                     pyramiding_info = {}
                     if self.pyramiding_enabled:
                         pyramiding_info = {
@@ -1625,19 +1641,14 @@ class BaseBot:
                             'pyramiding_base_roi': 0.0,
                         }
     
-                    self.symbol_data[symbol].update({
-                        'entry': avg_price,
-                        'entry_base': avg_price,
-                        'average_down_count': 0,
-                        'side': side,
-                        'qty': executed_qty if side == "BUY" else -executed_qty,
-                        'position_open': True,
-                        'status': "open",
-                        'high_water_mark_roi': 0,
-                        'roi_check_activated': False,
-                        'last_trade_time': time.time(),          # <--- THÊM DÒNG NÀY
-                        **pyramiding_info
-                    })
+                    # Chỉ cập nhật nếu position_open đã là True (từ cache hoặc từ order)
+                    if self.symbol_data[symbol]['position_open']:
+                        self.symbol_data[symbol].update({
+                            'high_water_mark_roi': 0,
+                            'roi_check_activated': False,
+                            'last_trade_time': time.time(),
+                            **pyramiding_info
+                        })
     
                     self.bot_coordinator.bot_has_coin(self.bot_id)
     
@@ -1647,7 +1658,8 @@ class BaseBot:
     
                     message = (f"✅ <b>ĐÃ MỞ VỊ THẾ {symbol}</b>\n"
                                f"🤖 Bot: {self.bot_id}\n📌 Hướng: {side}\n"
-                               f"🏷️ Entry: {avg_price:.4f}\n📊 Khối lượng: {executed_qty:.4f}\n"
+                               f"🏷️ Entry: {self.symbol_data[symbol]['entry']:.4f}\n"
+                               f"📊 Khối lượng: {abs(self.symbol_data[symbol]['qty']):.4f}\n"
                                f"💰 Đòn bẩy: {self.lev}x\n🎯 TP: {self.tp}% | 🛡️ SL: {self.sl}%")
                     if self.roi_trigger:
                         message += f" | 🎯 ROI Kích hoạt: {self.roi_trigger}%"
