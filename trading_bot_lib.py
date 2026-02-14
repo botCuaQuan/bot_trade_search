@@ -1,4 +1,4 @@
-# trading_bot_lib_final_fixed.py (HOÀN CHỈNH - ĐÃ SỬA LỖI LEVERAGE & RACE CONDITION & BLACKLIST TẠM)
+# trading_bot_lib_final_fixed.py (HOÀN CHỈNH - ĐÃ SỬA LỖI LEVERAGE & RACE CONDITION & BLACKLIST TẠM & CHIA CHO 0)
 # =============================================================================
 #  TÍNH NĂNG NỔI BẬT:
 #  1. Cache coin tập trung, thread‑safe, tự động làm mới trong BotManager.
@@ -21,6 +21,7 @@
 # 18. FIX: Dùng available_balance thay total_balance để tránh vượt ký quỹ.
 # 19. FIX: Tăng scan_cooldown lên 30 giây giảm tải hệ thống.
 # 20. FIX: Thêm blacklist tạm thời cho coin bị lỗi, tránh lặp lại ngay.
+# 21. FIX: Chống chia cho 0 khi entry chưa đồng bộ – kiểm tra invested <= 0 và bỏ qua chu kỳ.
 # =============================================================================
 
 import json
@@ -1482,6 +1483,13 @@ class BaseBot:
                         pos = positions[0]
                         entry_price = float(pos.get('entryPrice', 0))
                         position_amt = float(pos.get('positionAmt', 0))
+                        
+                        # FIXED: Nếu entry_price = 0 nhưng có vị thế → ép refresh cache và bỏ qua lần này
+                        if entry_price == 0 and abs(position_amt) > 0:
+                            self.log(f"⚠️ {symbol} - entryPrice = 0 nhưng có vị thế, ép refresh cache...")
+                            _POSITION_CACHE.refresh(force=True)
+                            return
+                        
                         # Chỉ cập nhật nếu entry_price hợp lệ (> 0)
                         if entry_price > 0:
                             self.symbol_data[symbol].update({
@@ -1662,6 +1670,7 @@ class BaseBot:
                 self.log(f"❌ {symbol} - Lỗi mở vị thế: {str(e)}")
                 self.stop_symbol(symbol, failed=True)
                 return False
+
     def _close_symbol_position(self, symbol, reason=""):
         # Thêm lock để an toàn
         with self.symbol_locks[symbol]:
@@ -1742,8 +1751,9 @@ class BaseBot:
             return
     
         entry = data['entry']
-        if entry <= 0:
-            self.log(f"⚠️ {symbol} - entry không hợp lệ ({entry}), bỏ qua TP/SL (chờ cập nhật)")
+        qty = data['qty']
+        # FIXED: Nếu entry <= 0 hoặc qty == 0 thì bỏ qua (chưa đồng bộ)
+        if entry <= 0 or qty == 0:
             return
     
         current_price = self.get_current_price(symbol)
@@ -1778,8 +1788,9 @@ class BaseBot:
             return
     
         entry = data['entry_base']
-        if entry <= 0:
-            self.log(f"⚠️ {symbol} - entry_base không hợp lệ ({entry}), bỏ qua pyramiding")
+        qty = data['qty']
+        # FIXED: Nếu entry <= 0 hoặc qty == 0 thì bỏ qua
+        if entry <= 0 or qty == 0:
             return
     
         current_price = self.get_current_price(symbol)
@@ -1798,6 +1809,7 @@ class BaseBot:
             data['next_pyramiding_roi'] = next_roi + self.pyramiding_x
             data['last_pyramiding_time'] = time.time()
             self.log(f"🔄 Nhồi lệnh {symbol} lần {data['pyramiding_count']} tại ROI {roi:.2f}%")
+
     def _pyramid_order(self, symbol, side):
         try:
             total_balance, available_balance = get_total_and_available_balance(self.api_key, self.api_secret)
@@ -1867,8 +1879,9 @@ class BaseBot:
             return False
     
         entry = data['entry_base']
-        if entry <= 0:
-            self.log(f"⚠️ {symbol} - entry_base không hợp lệ ({entry}), bỏ qua smart exit")
+        qty = data['qty']
+        # FIXED: Nếu entry <= 0 hoặc qty == 0 thì bỏ qua
+        if entry <= 0 or qty == 0:
             return False
     
         current_price = self.get_current_price(symbol)
@@ -1888,6 +1901,7 @@ class BaseBot:
             self._close_symbol_position(symbol, reason=f"(Smart exit - ROI từ {data['high_water_mark_roi']:.2f}% giảm còn {roi:.2f}%)")
             return True
         return False
+
     # ---------- Kiểm tra toàn cục ----------
     def check_global_positions(self):
         if hasattr(self, '_bot_manager') and self._bot_manager and hasattr(self._bot_manager, 'global_side_coordinator'):
