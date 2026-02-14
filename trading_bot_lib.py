@@ -1748,10 +1748,7 @@ class BaseBot:
     
         entry = data['entry']
         qty = data['qty']
-        # Nếu entry <= 0 hoặc qty == 0 thì bỏ qua (chưa đồng bộ)
-        if entry <= 0 or qty == 0:
-            return
-    
+
         current_price = self.get_current_price(symbol)
         if current_price <= 0:
             return
@@ -1785,9 +1782,6 @@ class BaseBot:
     
         entry = data['entry_base']
         qty = data['qty']
-        # Nếu entry <= 0 hoặc qty == 0 thì bỏ qua
-        if entry <= 0 or qty == 0:
-            return
     
         current_price = self.get_current_price(symbol)
         if current_price <= 0:
