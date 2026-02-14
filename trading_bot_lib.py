@@ -1868,9 +1868,9 @@ class BaseBot:
             return
     
         if data['side'] == 'BUY':
-            roi = (current_price - entry) / entry * 100
+            roi = (current_price - entry) / entry * 100 * self.lev
         else:
-            roi = (entry - current_price) / entry * 100
+            roi = (entry - current_price) / entry * 100 * self.lev
     
         next_roi = data['next_pyramiding_roi']
         if roi >= next_roi:
@@ -1959,9 +1959,9 @@ class BaseBot:
             return False
     
         if data['side'] == 'BUY':
-            roi = (current_price - entry) / entry * 100
+            roi = (current_price - entry) / entry * 100 * self.lev
         else:
-            roi = (entry - current_price) / entry * 100
+            roi = (entry - current_price) / entry * 100 * self.lev
     
         if roi >= self.roi_trigger and not data['roi_check_activated']:
             data['roi_check_activated'] = True
