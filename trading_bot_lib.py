@@ -1831,9 +1831,6 @@ class BaseBot:
         else:
             roi = (entry - current_price) / entry * 100 * self.lev
 
-        # Log ROI để debug
-        self.log(f"📊 {symbol} - ROI hiện tại: {roi:.2f}% (TP: {self.tp}%, SL: {self.sl}%)")
-
         if roi > data['high_water_mark_roi']:
             data['high_water_mark_roi'] = roi
 
