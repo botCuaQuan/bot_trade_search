@@ -1,4 +1,4 @@
-# trading_bot_lib_final_complete.py (HOÀN CHỈNH - SỬA LỖI CHIA 0 + CẢI THIỆN CACHE + ĐẢM BẢO CHỐT LỜI)
+# trading_bot_lib_final_complete_fixed.py (HOÀN CHỈNH - SỬA LỖI KIỂM TRA NGƯỠNG GIÁ + CẢI THIỆN GIÁ)
 # =============================================================================
 #  TÍNH NĂNG NỔI BẬT:
 #  1. Cache coin tập trung, thread‑safe, tự động làm mới trong BotManager.
@@ -28,6 +28,8 @@
 # 25. CẢI THIỆN: Polling sau khi đặt lệnh, kiểm tra API trực tiếp khi nghi ngờ mất vị thế.
 # 26. BỔ SUNG: Kiểm tra entry > 0 trong _check_pyramiding để tránh chia 0.
 # 27. ĐẢM BẢO CHỐT LỜI: Thêm log ROI, gọi _check_symbol_tp_sl thường xuyên, cập nhật entry chính xác.
+# 28. FIX: Kiểm tra ngưỡng giá khi mở lệnh (cả lần đầu và pyramiding) để tránh vi phạm chiến lược.
+# 29. CẢI THIỆN: Lấy giá tươi (từ WebSocket nếu gần đây, nếu không thì gọi API) trước khi mở lệnh.
 # =============================================================================
 
 import json
@@ -1449,6 +1451,7 @@ class BaseBot:
             'qty': 0,
             'status': 'waiting',
             'last_price': 0,
+            'last_price_time': 0,              # Thời gian cập nhật giá gần nhất
             'last_trade_time': 0,
             'last_close_time': 0,
             'last_position_check': 0,
@@ -1467,11 +1470,24 @@ class BaseBot:
         if symbol not in self.symbol_data:
             return
         self.symbol_data[symbol]['last_price'] = price
+        self.symbol_data[symbol]['last_price_time'] = time.time()
 
     def get_current_price(self, symbol):
         if symbol in self.symbol_data and self.symbol_data[symbol]['last_price'] > 0:
             return self.symbol_data[symbol]['last_price']
         return get_current_price(symbol)
+
+    def _get_fresh_price(self, symbol):
+        """Lấy giá mới nhất, ưu tiên từ WebSocket nếu cập nhật trong vòng 5 giây, nếu không thì gọi API."""
+        data = self.symbol_data.get(symbol)
+        if data and time.time() - data.get('last_price_time', 0) < 5:
+            return data['last_price']
+        # Gọi API
+        price = get_current_price(symbol)
+        if price > 0 and data:
+            data['last_price'] = price
+            data['last_price_time'] = time.time()
+        return price
 
     # ---------- Kiểm tra vị thế (dùng cache và fallback API) ----------
     def _force_check_position(self, symbol):
@@ -1567,7 +1583,7 @@ class BaseBot:
             })
             self.symbol_data[symbol]['last_close_time'] = time.time()
 
-    # ---------- Mở / Đóng lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ + POLLING) ----------
+    # ---------- Mở / Đóng lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ + POLLING + KIỂM TRA NGƯỠNG GIÁ) ----------
     def _open_symbol_position(self, symbol, side):
         with self.symbol_locks[symbol]:
             try:
@@ -1605,11 +1621,25 @@ class BaseBot:
                 if required_usd > available_balance:
                     self.log(f"⚠️ {symbol} - {self.percent}% tổng số dư ({required_usd:.2f}) > số dư khả dụng ({available_balance:.2f}), vẫn thử lệnh...")
     
-                current_price = self.get_current_price(symbol)
+                # Lấy giá tươi trước khi mở lệnh
+                current_price = self._get_fresh_price(symbol)
                 if current_price <= 0:
                     self.log(f"❌ {symbol} - Lỗi giá")
                     self.stop_symbol(symbol, failed=True)
                     return False
+
+                # --- KIỂM TRA NGƯỠNG GIÁ THEO CHIẾN LƯỢC CÂN BẰNG ---
+                if self.enable_balance_orders:
+                    buy_threshold = _BALANCE_CONFIG.get("buy_price_threshold", 1.0)
+                    sell_threshold = _BALANCE_CONFIG.get("sell_price_threshold", 10.0)
+                    if side == "BUY" and current_price >= buy_threshold:
+                        self.log(f"⚠️ {symbol} - Giá hiện tại {current_price:.4f} >= ngưỡng mua {buy_threshold}, không mở lệnh BUY")
+                        self.stop_symbol(symbol, failed=True)
+                        return False
+                    if side == "SELL" and current_price <= sell_threshold:
+                        self.log(f"⚠️ {symbol} - Giá hiện tại {current_price:.4f} <= ngưỡng bán {sell_threshold}, không mở lệnh SELL")
+                        self.stop_symbol(symbol, failed=True)
+                        return False
     
                 step_size = get_step_size(symbol)
                 min_qty = get_min_qty_from_cache(symbol)
@@ -1843,7 +1873,7 @@ class BaseBot:
             self._close_symbol_position(symbol, reason=f"(SL {self.sl}%)")
             return
 
-    # ---------- Nhồi lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ + KIỂM TRA entry) ----------
+    # ---------- Nhồi lệnh (ĐÃ SỬA: DÙNG % TỔNG SỐ DƯ + KIỂM TRA entry + KIỂM TRA NGƯỠNG GIÁ) ----------
     def _check_pyramiding(self, symbol):
         if not self.pyramiding_enabled:
             return
@@ -1892,9 +1922,21 @@ class BaseBot:
             if usd_amount > available_balance:
                 self.log(f"⚠️ {symbol} - Nhồi lệnh: {self.percent}% tổng số dư ({usd_amount:.2f}) lớn hơn số dư khả dụng ({available_balance:.2f}), vẫn thử...")
     
-            current_price = self.get_current_price(symbol)
+            # Lấy giá tươi
+            current_price = self._get_fresh_price(symbol)
             if current_price <= 0:
                 return
+
+            # --- KIỂM TRA NGƯỠNG GIÁ KHI NHỒI LỆNH ---
+            if self.enable_balance_orders:
+                buy_threshold = _BALANCE_CONFIG.get("buy_price_threshold", 1.0)
+                sell_threshold = _BALANCE_CONFIG.get("sell_price_threshold", 10.0)
+                if side == "BUY" and current_price >= buy_threshold:
+                    self.log(f"⚠️ Không nhồi lệnh {symbol}: giá {current_price:.4f} >= ngưỡng mua {buy_threshold}")
+                    return
+                if side == "SELL" and current_price <= sell_threshold:
+                    self.log(f"⚠️ Không nhồi lệnh {symbol}: giá {current_price:.4f} <= ngưỡng bán {sell_threshold}")
+                    return
     
             step_size = get_step_size(symbol)
             min_qty = get_min_qty_from_cache(symbol)
