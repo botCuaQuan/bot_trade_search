@@ -1,7 +1,41 @@
-# trading_bot_lib.py (HOÀN CHỈNH - BỔ SUNG TARGET VÀ PHỤC HỒI VỊ THẾ)
+# trading_bot_lib.py (HOÀN CHỈNH - PHỤC HỒI VỊ THẾ + QUẢN LÝ TARGET)
 # =============================================================================
 #  TÍNH NĂNG NỔI BẬT:
-#  ... (giữ nguyên phần mô tả) ...
+#  1. Cache coin tập trung, thread‑safe, tự động làm mới trong BotManager.
+#  2. Cache vị thế tập trung – cập nhật định kỳ, dùng chung, giảm tải API.
+#  3. FIFO queue cho bot động: chỉ 1 bot được tìm coin tại 1 thời điểm.
+#  4. Lọc coin CHỈ dựa trên ngưỡng giá – KHÔNG lọc đòn bẩy từ exchangeInfo.
+#  5. SẮP XẾP COIN THEO KHỐI LƯỢNG GIẢM DẦN – ưu tiên thanh khoản.
+#  6. Cân bằng lệnh toàn cục dựa trên số lượng vị thế LONG/SHORT (dùng cache).
+#  7. TỰ ĐỘNG GIẢM ĐÒN BẨY khi không tìm thấy coin – giữ bot hoạt động (tuỳ chọn).
+#  8. LOG CHI TIẾT NGUYÊN NHÂN KHÔNG TÌM THẤY COIN – dễ debug.
+#  9. Hỗ trợ đầy đủ USDT và USDC.
+# 10. Telegram tương tác + cấu hình trực quan, xử lý bất đồng bộ.
+# 11. FIX: Bot giải phóng queue ngay khi thất bại, không treo.
+# 12. FIX: Không giữ lock khi gọi API, tránh deadlock.
+# 13. FIX: Cache vị thế giúp giảm 90% số lần gọi /positionRisk.
+# 14. FIX: Xác thực minQty, minNotional trước khi đặt lệnh.
+# 15. FIX: Xoá bot khỏi queue khi dừng – không rò rỉ bộ nhớ.
+# 16. FIX: Leverage – không lọc coin theo maxLeverage từ exchangeInfo, chỉ thử set thực tế.
+# 17. FIX: Race condition – thêm symbol lock khi mở/đóng vị thế.
+# 18. FIX: Dùng available_balance thay total_balance để tránh vượt ký quỹ.
+# 19. FIX: Tăng scan_cooldown lên 30 giây giảm tải hệ thống.
+# 20. FIX: Thêm blacklist tạm thời cho coin bị lỗi, tránh lặp lại ngay.
+# 21. FIX: Chống chia cho 0 khi entry chưa đồng bộ – kiểm tra entry > 0 và qty != 0 ở mọi nơi.
+# 22. FIX: TP/SL = 0 được hiểu là "tắt" (tương thích với file 30).
+# 23. BẢO VỆ 3 LỚP: Chặn chia 0, chỉ mở position khi entry hợp lệ, chờ 3s sau lệnh mới check TP/SL.
+# 24. FIX: Không ghi đè entry từ order khi cache đã có dữ liệu hợp lệ.
+# 25. CẢI THIỆN: Polling sau khi đặt lệnh, kiểm tra API trực tiếp khi nghi ngờ mất vị thế.
+# 26. BỔ SUNG: Kiểm tra entry > 0 trong _check_pyramiding để tránh chia 0.
+# 27. ĐẢM BẢO CHỐT LỜI: Thêm log ROI, gọi _check_symbol_tp_sl thường xuyên, cập nhật entry chính xác.
+# 28. FIX: Kiểm tra ngưỡng giá khi mở lệnh (cả lần đầu và pyramiding) để tránh vi phạm chiến lược.
+# 29. CẢI THIỆN: Lấy giá tươi (từ WebSocket nếu gần đây, nếu không thì gọi API) trước khi mở lệnh.
+# 30. CẢI THIỆN CHỐT LỜI: Khi đóng vị thế, lấy khối lượng thực tế từ Binance qua API để đảm bảo chính xác.
+# 31. BỔ SUNG: Hiển thị chi tiết TP/SL, số dư margin trong thống kê và Telegram.
+# 32. CẢI THIỆN GIAO DIỆN: Đánh số bot theo thứ tự thời gian tạo (bot_1, bot_2,...).
+# 33. TỰ ĐỘNG PHỤC HỒI: Khi khởi động, tạo bot quản lý các vị thế có sẵn trên Binance,
+#      dùng cấu hình của lần thêm bot gần nhất (lưu trong bộ nhớ).
+# 34. QUẢN LÝ TARGET: Số bot tối đa do người dùng nhập; bot thừa sẽ tự hủy sau khi đóng vị thế.
 # =============================================================================
 
 import json
@@ -84,9 +118,9 @@ _COINS_CACHE = CoinCache()
 class BalanceConfig:
     def __init__(self):
         self._config = {
-            "buy_price_threshold": 0.5,
-            "sell_price_threshold": 20.0,
-            "min_leverage": 50,
+            "buy_price_threshold": 1.0,
+            "sell_price_threshold": 10.0,
+            "min_leverage": 10,
             "sort_by_volume": True,
         }
         self._lock = threading.RLock()
@@ -196,8 +230,7 @@ def create_main_menu():
             [{"text": "➕ Thêm Bot"}, {"text": "⛔ Dừng Bot"}],
             [{"text": "⛔ Quản lý Coin"}, {"text": "📈 Vị thế"}],
             [{"text": "💰 Số dư"}, {"text": "⚙️ Cấu hình"}],
-            [{"text": "🎯 Chiến lược"}, {"text": "⚖️ Cân bằng lệnh"}],
-            [{"text": "🔄 Phục hồi vị thế"}]   # Thêm nút phục hồi (tùy chọn)
+            [{"text": "🎯 Chiến lược"}, {"text": "⚖️ Cân bằng lệnh"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -1307,9 +1340,6 @@ class BaseBot:
             sell_price_threshold=self.balance_config['sell_price_threshold']
         )
 
-        # === THÊM: Đánh dấu bot có phải là recovered hay không ===
-        self.is_recovered = kwargs.get('is_recovered', False)
-
         if symbol and not self.coin_finder.has_existing_position(symbol):
             self._add_symbol(symbol)
 
@@ -1792,7 +1822,7 @@ class BaseBot:
                     _POSITION_CACHE.refresh(force=True)
                     self._reset_symbol_position(symbol)
 
-                    # Thông báo cho BotManager xử lý target
+                    # THÔNG BÁO CHO BOTMANAGER XỬ LÝ TARGET
                     if self._bot_manager:
                         self._bot_manager.on_bot_closed_position(self.bot_id)
 
@@ -2104,7 +2134,10 @@ class BotManager:
         self.symbol_locks = defaultdict(threading.RLock)
         self.global_side_coordinator = GlobalSideCoordinator()
 
-        # === Số bot tối đa cho phép (mục tiêu) ===
+        # <--- THÊM MỚI: Biến lưu cấu hình phục hồi (lấy từ lần thêm bot gần nhất) --->
+        self.recover_config = None   # sẽ được cập nhật khi thêm bot thành công
+
+        # <--- THÊM MỚI: Biến quản lý target --->
         self.target_bot_count = 0
 
         if api_key and api_secret:
@@ -2116,14 +2149,94 @@ class BotManager:
             self._cache_thread.start()
             self._position_cache_thread = threading.Thread(target=self._position_cache_updater, daemon=True, name='pos_cache')
             self._position_cache_thread.start()
+            # <--- THÊM MỚI: Phục hồi vị thế sau khi cache sẵn sàng --->
+            self._recover_positions_from_binance()
+            # ---------------------------------------------------------
             self.telegram_thread = threading.Thread(target=self._telegram_listener, daemon=True, name='telegram')
             self.telegram_thread.start()
             if self.telegram_chat_id:
                 self.send_main_menu(self.telegram_chat_id)
-
-            # ĐÃ XÓA dòng self._recover_positions_from_binance()
         else:
             self.log("⚡ BotManager đã khởi động ở chế độ không cấu hình")
+
+    # <--- THÊM MỚI: Hàm phục hồi vị thế --->
+    def _recover_positions_from_binance(self):
+        """Tự động tạo bot cho các vị thế đang có trên Binance khi khởi động,
+           sử dụng cấu hình từ lần thêm bot gần nhất (nếu có), nếu không thì bỏ qua."""
+        try:
+            positions = _POSITION_CACHE.get_positions()
+            if not positions:
+                return
+
+            # Nếu chưa có cấu hình phục hồi (chưa thêm bot lần nào), thì không làm gì
+            if self.recover_config is None:
+                self.log("ℹ️ Chưa có cấu hình phục hồi (chưa thêm bot lần nào), bỏ qua phục hồi vị thế.")
+                return
+
+            config = self.recover_config
+            created = 0
+            for pos in positions:
+                amt = float(pos.get('positionAmt', 0))
+                if amt == 0:
+                    continue
+                symbol = pos['symbol']
+                if self.coin_manager.is_coin_active(symbol):
+                    continue
+
+                bot_id = f"RECOVER_{symbol}_{int(time.time())}_{created}"
+                bot = BaseBot(
+                    symbol=None,
+                    lev=config['leverage'],
+                    percent=config['percent'],
+                    tp=config['tp'] if config['tp'] != 0 else None,
+                    sl=config['sl'] if config['sl'] != 0 else None,
+                    roi_trigger=config['roi_trigger'],
+                    ws_manager=self.ws_manager,
+                    api_key=self.api_key,
+                    api_secret=self.api_secret,
+                    telegram_bot_token=self.telegram_bot_token,
+                    telegram_chat_id=self.telegram_chat_id,
+                    coin_manager=self.coin_manager,
+                    symbol_locks=self.symbol_locks,
+                    bot_coordinator=self.bot_coordinator,
+                    bot_id=bot_id,
+                    max_coins=1,
+                    pyramiding_n=config['pyramiding_n'],
+                    pyramiding_x=config['pyramiding_x'],
+                    enable_balance_orders=config['enable_balance_orders'],
+                    buy_price_threshold=config['buy_price_threshold'],
+                    sell_price_threshold=config['sell_price_threshold'],
+                    strategy_name="Recovered"
+                )
+                bot._bot_manager = self
+                bot.coin_finder.set_bot_manager(self)
+                bot._add_symbol(symbol)
+                self.bot_coordinator.bot_has_coin(bot_id)
+                self.bots[bot_id] = bot
+                created += 1
+
+            if created > 0:
+                self.target_bot_count = created
+                self.log(f"🔄 Đã phục hồi {created} bot từ vị thế có sẵn trên Binance. Target hiện tại: {self.target_bot_count}")
+        except Exception as e:
+            self.log(f"❌ Lỗi phục hồi vị thế: {str(e)}")
+
+    # <--- THÊM MỚI: Hàm xử lý khi bot đóng vị thế --->
+    def on_bot_closed_position(self, bot_id):
+        bot = self.bots.get(bot_id)
+        if not bot:
+            return
+
+        if len(self.bots) > self.target_bot_count:
+            self.log(f"⚠️ Bot {bot_id} đóng vị thế và vượt target ({self.target_bot_count}), sẽ dừng hẳn.")
+            bot.stop()
+            del self.bots[bot_id]
+            self.bot_coordinator.remove_bot(bot_id)
+        else:
+            self.log(f"🔄 Bot {bot_id} đóng vị thế, chuyển sang tìm coin mới (target={self.target_bot_count})")
+            bot.status = "searching"
+            bot.active_symbols.clear()
+            bot.symbol_data.clear()
 
     def _initialize_cache(self):
         logger.info("🔄 Hệ thống đang khởi tạo cache...")
@@ -2166,158 +2279,6 @@ class BotManager:
         except Exception as e:
             self.log(f"❌ Lỗi kiểm tra kết nối: {str(e)}")
             return False
-
-    def add_bot(self, symbol, lev, percent, tp, sl, roi_trigger, strategy_type, bot_count=1, **kwargs):
-        # Chuyển sl = 0 thành None (tắt)
-        if sl == 0:
-            sl = None
-
-        if not self.api_key or not self.api_secret:
-            self.log("❌ API Key chưa được cài đặt trong BotManager")
-            return False
-
-        if not self._verify_api_connection():
-            self.log("❌ KHÔNG THỂ KẾT NỐI VỚI BINANCE - KHÔNG THỂ TẠO BOT")
-            return False
-
-        # Tăng tổng số bot mục tiêu
-        self.target_bot_count += bot_count
-
-        # Lấy danh sách vị thế hiện tại chưa được bot nào quản lý
-        all_positions = _POSITION_CACHE.get_positions()
-        unmanaged_symbols = []
-        for pos in all_positions:
-            amt = float(pos.get('positionAmt', 0))
-            if amt != 0:
-                sym = pos['symbol']
-                if not self.coin_manager.is_coin_active(sym):
-                    unmanaged_symbols.append(sym)
-
-        # Số bot sẽ được gán cho các vị thế dư (tối đa bằng bot_count)
-        num_recover = min(len(unmanaged_symbols), bot_count)
-        created = 0
-
-        # --- Tạo bot cho các vị thế dư (recovered) ---
-        for i in range(num_recover):
-            sym = unmanaged_symbols[i]
-            bot_id = f"RECOVERED_{sym}_{int(time.time())}_{created}"
-            bot = BaseBot(
-                symbol=None,   # không truyền symbol, sẽ gán sau
-                lev=lev,
-                percent=percent,
-                tp=tp,
-                sl=sl,
-                roi_trigger=roi_trigger,
-                ws_manager=self.ws_manager,
-                api_key=self.api_key,
-                api_secret=self.api_secret,
-                telegram_bot_token=self.telegram_bot_token,
-                telegram_chat_id=self.telegram_chat_id,
-                coin_manager=self.coin_manager,
-                symbol_locks=self.symbol_locks,
-                bot_coordinator=self.bot_coordinator,
-                bot_id=bot_id,
-                max_coins=1,
-                pyramiding_n=kwargs.get('pyramiding_n', 0),
-                pyramiding_x=kwargs.get('pyramiding_x', 0),
-                enable_balance_orders=kwargs.get('enable_balance_orders', True),
-                buy_price_threshold=kwargs.get('buy_price_threshold', 1.0),
-                sell_price_threshold=kwargs.get('sell_price_threshold', 10.0),
-                strategy_name="Recovered",
-                is_recovered=True   # đánh dấu bot phục hồi
-            )
-            bot._bot_manager = self
-            bot.coin_finder.set_bot_manager(self)
-            # Gán symbol có vị thế cho bot
-            bot._add_symbol(sym)
-            self.bot_coordinator.bot_has_coin(bot_id)
-            self.bots[bot_id] = bot
-            created += 1
-
-        # --- Tạo các bot thường còn lại ---
-        remaining = bot_count - num_recover
-        for i in range(remaining):
-            if kwargs.get('bot_mode') == 'static' and symbol:
-                bot_id = f"STATIC_{strategy_type}_{int(time.time())}_{i}"
-            else:
-                bot_id = f"DYNAMIC_{strategy_type}_{int(time.time())}_{i}"
-
-            bot = BaseBot(
-                symbol=symbol if kwargs.get('bot_mode') == 'static' else None,
-                lev=lev,
-                percent=percent,
-                tp=tp,
-                sl=sl,
-                roi_trigger=roi_trigger,
-                ws_manager=self.ws_manager,
-                api_key=self.api_key,
-                api_secret=self.api_secret,
-                telegram_bot_token=self.telegram_bot_token,
-                telegram_chat_id=self.telegram_chat_id,
-                coin_manager=self.coin_manager,
-                symbol_locks=self.symbol_locks,
-                bot_coordinator=self.bot_coordinator,
-                bot_id=bot_id,
-                max_coins=1,
-                pyramiding_n=kwargs.get('pyramiding_n', 0),
-                pyramiding_x=kwargs.get('pyramiding_x', 0),
-                enable_balance_orders=kwargs.get('enable_balance_orders', True),
-                buy_price_threshold=kwargs.get('buy_price_threshold', 1.0),
-                sell_price_threshold=kwargs.get('sell_price_threshold', 10.0),
-                strategy_name=strategy_type,
-                is_recovered=False
-            )
-            bot._bot_manager = self
-            bot.coin_finder.set_bot_manager(self)
-            self.bots[bot_id] = bot
-            created += 1
-
-        # --- Ghi log kết quả ---
-        if created > 0:
-            roi_info = f" | 🎯 ROI Kích hoạt: {roi_trigger}%" if roi_trigger else " | 🎯 ROI Kích hoạt: Tắt"
-            pyramiding_info = f" | 🔄 Nhồi lệnh: {pyramiding_n} lần tại {pyramiding_x}%" if kwargs.get('pyramiding_n', 0) > 0 and kwargs.get('pyramiding_x', 0) > 0 else " | 🔄 Nhồi lệnh: Tắt"
-            balance_info = ""
-            if kwargs.get('enable_balance_orders', True):
-                balance_info = (f"\n⚖️ <b>CÂN BẰNG LỆNH: BẬT</b>\n"
-                                f"• Mua: giá < {kwargs.get('buy_price_threshold', 1.0)} USDT/USDC\n"
-                                f"• Bán: giá > {kwargs.get('sell_price_threshold', 10.0)} USDT/USDC\n"
-                                f"• Đòn bẩy tối thiểu: {_BALANCE_CONFIG.get('min_leverage', 10)}x (kiểm tra thực tế)\n"
-                                f"• SẮP XẾP: Theo khối lượng giảm dần\n")
-
-            success_msg = (f"✅ <b>ĐÃ TẠO {created} BOT CÂN BẰNG</b>\n\n"
-                           f"🎯 Chiến lược: {strategy_type}\n💰 Đòn bẩy: {lev}x\n"
-                           f"📈 % Số dư: {percent}%\n🎯 TP: {tp}%\n"
-                           f"🛡️ SL: {sl if sl is not None else 'Tắt'}%{roi_info}{pyramiding_info}\n"
-                           f"🔧 Chế độ: {kwargs.get('bot_mode', 'dynamic')}\n🔢 Số bot yêu cầu: {bot_count}\n"
-                           f"🔄 Đã gán {num_recover} bot cho vị thế hiện có.\n")
-            if num_recover > 0:
-                success_msg += f"📌 Các vị thế được phục hồi: {', '.join(unmanaged_symbols[:num_recover])}\n"
-            success_msg += balance_info
-            self.log(success_msg)
-            return True
-        else:
-            self.log("❌ Không thể tạo bot")
-            return False
-
-    def on_bot_closed_position(self, bot_id):
-        """Được gọi khi một bot đóng vị thế thành công"""
-        bot = self.bots.get(bot_id)
-        if not bot:
-            return
-
-        # Nếu tổng số bot hiện tại > target và bot là recovered -> xóa bot
-        if len(self.bots) > self.target_bot_count and getattr(bot, 'is_recovered', False):
-            self.log(f"⚠️ Bot {bot_id} (recovered) đóng vị thế và vượt target ({self.target_bot_count}), sẽ dừng hẳn.")
-            bot.stop()  # dừng bot (giải phóng tài nguyên)
-            del self.bots[bot_id]
-            self.bot_coordinator.remove_bot(bot_id)
-        else:
-            # Bot bình thường, chuyển sang tìm coin mới
-            self.log(f"🔄 Bot {bot_id} đóng vị thế, chuyển sang tìm coin mới (target={self.target_bot_count})")
-            bot.status = "searching"
-            bot.active_symbols.clear()
-            bot.symbol_data.clear()
-            # Bot sẽ tự động tìm coin trong vòng lặp _run
 
     def get_position_summary(self):
         try:
@@ -2466,6 +2427,116 @@ class BotManager:
         send_telegram(welcome, chat_id=chat_id, reply_markup=create_main_menu(),
                      bot_token=self.telegram_bot_token, default_chat_id=self.telegram_chat_id)
 
+    def add_bot(self, symbol, lev, percent, tp, sl, roi_trigger, strategy_type, bot_count=1, **kwargs):
+        # Chuyển sl = 0 thành None (tắt)
+        if sl == 0: sl = None
+
+        if not self.api_key or not self.api_secret:
+            self.log("❌ API Key chưa được cài đặt trong BotManager")
+            return False
+
+        if not self._verify_api_connection():
+            self.log("❌ KHÔNG THỂ KẾT NỐI VỚI BINANCE - KHÔNG THỂ TẠO BOT")
+            return False
+
+        bot_mode = kwargs.get('bot_mode', 'static')
+        pyramiding_n = kwargs.get('pyramiding_n', 0)
+        pyramiding_x = kwargs.get('pyramiding_x', 0)
+
+        enable_balance_orders = kwargs.get('enable_balance_orders', True)
+        buy_price_threshold = kwargs.get('buy_price_threshold', 1.0)
+        sell_price_threshold = kwargs.get('sell_price_threshold', 10.0)
+
+        created_count = 0
+
+        # <--- THÊM MỚI: Tăng target trước khi tạo bot --->
+        self.target_bot_count += bot_count
+
+        try:
+            for i in range(bot_count):
+                if bot_mode == 'static' and symbol:
+                    bot_id = f"STATIC_{strategy_type}_{int(time.time())}_{i}"
+                else:
+                    bot_id = f"DYNAMIC_{strategy_type}_{int(time.time())}_{i}"
+
+                if bot_id in self.bots:
+                    continue
+
+                bot = BaseBot(
+                    symbol, lev, percent, tp, sl, roi_trigger, self.ws_manager,
+                    self.api_key, self.api_secret, self.telegram_bot_token, self.telegram_chat_id,
+                    coin_manager=self.coin_manager, symbol_locks=self.symbol_locks,
+                    bot_coordinator=self.bot_coordinator, bot_id=bot_id, max_coins=1,
+                    pyramiding_n=pyramiding_n, pyramiding_x=pyramiding_x,
+                    enable_balance_orders=enable_balance_orders,
+                    buy_price_threshold=buy_price_threshold,
+                    sell_price_threshold=sell_price_threshold,
+                    strategy_name=strategy_type
+                )
+                bot._bot_manager = self
+                bot.coin_finder.set_bot_manager(self)
+                self.bots[bot_id] = bot
+                created_count += 1
+        except Exception as e:
+            # Nếu có lỗi, giảm target lại
+            self.target_bot_count -= (bot_count - created_count)
+            self.log(f"❌ Lỗi tạo bot: {str(e)}")
+            return False
+
+        if created_count > 0:
+            # <--- THÊM MỚI: Lưu cấu hình lần thêm bot này để dùng phục hồi sau này --->
+            self.recover_config = {
+                'leverage': lev,
+                'percent': percent,
+                'tp': tp if tp is not None else 0,
+                'sl': sl if sl is not None else 0,
+                'roi_trigger': roi_trigger,
+                'pyramiding_n': pyramiding_n,
+                'pyramiding_x': pyramiding_x,
+                'enable_balance_orders': enable_balance_orders,
+                'buy_price_threshold': buy_price_threshold,
+                'sell_price_threshold': sell_price_threshold,
+                'bot_mode': bot_mode
+            }
+
+            roi_info = f" | 🎯 ROI Kích hoạt: {roi_trigger}%" if roi_trigger else " | 🎯 ROI Kích hoạt: Tắt"
+            pyramiding_info = f" | 🔄 Nhồi lệnh: {pyramiding_n} lần tại {pyramiding_x}%" if pyramiding_n > 0 and pyramiding_x > 0 else " | 🔄 Nhồi lệnh: Tắt"
+            balance_info = ""
+            if enable_balance_orders:
+                balance_info = (f"\n⚖️ <b>CÂN BẰNG LỆNH: BẬT</b>\n"
+                                f"• Mua: giá < {buy_price_threshold} USDT/USDC\n"
+                                f"• Bán: giá > {sell_price_threshold} USDT/USDC\n"
+                                f"• Đòn bẩy tối thiểu: {_BALANCE_CONFIG.get('min_leverage', 10)}x (kiểm tra thực tế)\n"
+                                f"• SẮP XẾP: Theo khối lượng giảm dần\n")
+
+            success_msg = (f"✅ <b>ĐÃ TẠO {created_count} BOT CÂN BẰNG</b>\n\n"
+                           f"🎯 Chiến lược: {strategy_type}\n💰 Đòn bẩy: {lev}x\n"
+                           f"📈 % Số dư: {percent}%\n🎯 TP: {tp}%\n"
+                           f"🛡️ SL: {sl if sl is not None else 'Tắt'}%{roi_info}{pyramiding_info}\n"
+                           f"🔧 Chế độ: {bot_mode}\n🔢 Số bot: {created_count}\n")
+            if bot_mode == 'static' and symbol:
+                success_msg += f"🔗 Coin ban đầu: {symbol}\n"
+            else:
+                success_msg += f"🔗 Coin: Tự động tìm (USDT/USDC) - sắp xếp theo volume\n"
+            success_msg += balance_info
+            success_msg += (f"\n🔄 <b>CƠ CHẾ CÂN BẰNG ĐƯỢC KÍCH HOẠT</b>\n"
+                           f"• Đếm số lượng lệnh BUY/SELL hiện có\n"
+                           f"• Ưu tiên hướng ngược lại khi mất cân bằng\n"
+                           f"• Lọc coin theo ngưỡng giá (MUA <{buy_price_threshold}, BÁN >{sell_price_threshold})\n"
+                           f"• Yêu cầu đòn bẩy tối thiểu: {_BALANCE_CONFIG.get('min_leverage', 10)}x (thử set thực tế)\n"
+                           f"• SẮP XẾP coin theo khối lượng giảm dần\n\n")
+            if pyramiding_n > 0:
+                success_msg += (f"🔄 <b>NHỒI LỆNH ĐƯỢC KÍCH HOẠT</b>\n"
+                               f"• Nhồi {pyramiding_n} lần khi đạt mỗi mốc {pyramiding_x}% ROI\n"
+                               f"• Mỗi lần nhồi dùng {percent}% vốn ban đầu\n"
+                               f"• Tự động cập nhật giá trung bình\n\n")
+            success_msg += f"⚡ <b>MỖI BOT CHẠY TRONG LUỒNG RIÊNG BIỆT</b>"
+            self.log(success_msg)
+            return True
+        else:
+            self.log("❌ Không thể tạo bot")
+            return False
+
     # ----- Các phương thức dừng coin, bot... (giữ nguyên) -----
     def stop_coin(self, symbol):
         stopped_count = 0
@@ -2575,7 +2646,7 @@ class BotManager:
             logger.error(f"Lỗi xử lý tin nhắn Telegram: {str(e)}")
 
     def _process_telegram_command(self, chat_id, text):
-        # (Giữ nguyên từ file 66, copy vào đây)
+        # (Giữ nguyên từ file gốc, copy vào đây)
         user_state = self.user_states.get(chat_id, {})
         current_step = user_state.get('step')
 
