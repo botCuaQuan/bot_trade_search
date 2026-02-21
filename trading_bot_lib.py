@@ -2103,7 +2103,10 @@ class BotManager:
         sell_price_threshold = kwargs.get('sell_price_threshold', 10.0)
 
         current_bot_count = len(self.bots)
-        target = bot_count  # target là tổng số bot mong muốn
+        target = bot_count
+
+        # Log để debug
+        self.log(f"🔍 add_bot: current_bot_count={current_bot_count}, target={target}")
 
         # Nếu target <= số bot hiện có, chỉ cập nhật target
         if target <= current_bot_count:
@@ -2203,8 +2206,7 @@ class BotManager:
             self.log("❌ Không thể tạo bot")
             return False
 
-    # ---------- CÁC PHƯƠNG THỨC KHÁC (GIỮ NGUYÊN TỪ FILE GỐC) ----------
-    # (Tôi đã copy từ file gốc của bạn, đảm bảo đầy đủ)
+    # ---------- CÁC PHƯƠNG THỨC KHÁC (GIỮ NGUYÊN) ----------
     def _initialize_cache(self):
         logger.info("🔄 Hệ thống đang khởi tạo cache...")
         if refresh_coins_cache():
@@ -2467,7 +2469,7 @@ class BotManager:
             self.stop_bot(bot_id)
         self.log("🔴 Đã dừng tất cả bot, hệ thống vẫn chạy")
 
-    # ---------- XỬ LÝ TELEGRAM (GIỮ NGUYÊN TỪ FILE GỐC) ----------
+    # ---------- XỬ LÝ TELEGRAM ----------
     def _telegram_listener(self):
         last_update_id = 0
         executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='tg_handler')
