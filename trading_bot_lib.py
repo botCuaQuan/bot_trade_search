@@ -84,9 +84,9 @@ _COINS_CACHE = CoinCache()
 class BalanceConfig:
     def __init__(self):
         self._config = {
-            "buy_price_threshold": 1.0,
-            "sell_price_threshold": 10.0,
-            "min_leverage": 10,
+            "buy_price_threshold": 0.5,
+            "sell_price_threshold": 20.0,
+            "min_leverage": 50,
             "sort_by_volume": True,
         }
         self._lock = threading.RLock()
@@ -2175,16 +2175,16 @@ class BotManager:
 
             # Cấu hình mặc định cứng
             default_config = {
-                'leverage': 10,
-                'percent': 10,
+                'leverage': 50,
+                'percent': 1,
                 'tp': 50,
-                'sl': 20,
+                'sl': 0,
                 'roi_trigger': None,
-                'pyramiding_n': 0,
-                'pyramiding_x': 0,
+                'pyramiding_n': 5,
+                'pyramiding_x': 300,
                 'enable_balance_orders': True,
-                'buy_price_threshold': 1.0,
-                'sell_price_threshold': 10.0,
+                'buy_price_threshold': 0.5,
+                'sell_price_threshold': 20.0,
                 'bot_mode': 'dynamic',  # các bot phục hồi sẽ tự tìm coin nếu cần, nhưng vì đã có vị thế nên chúng sẽ nhận luôn
             }
 
